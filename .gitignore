@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Kaggle credentials must never enter the repo.
+kaggle.json
+*.env
+
+# Smoke-test output is throwaway and must never reach the paper.
+results/smoke/
+
+# LaTeX build artefacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
+
+# NOTE: results/raw/ is intentionally NOT ignored. Raw run output is the
+# provenance for every number in the paper and is committed verbatim.
+.pytest_cache/

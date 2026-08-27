@@ -1,0 +1,16 @@
+{
+  "pinned_at_utc": "2026-08-27T18:54:40.199258+00:00",
+  "models": {
+    "qwen2.5-3b-instruct": {
+      "hf_id": "Qwen/Qwen2.5-3B-Instruct",
+      "sha": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
+      "last_modified": "2024-09-25 12:33:00+00:00",
+      "gated": false
+    }
+  },
+  "dataset": {
+    "hf_id": "facebook/belebele",
+    "sha": "7899cdfa4e1e0d733fd77c848e2c273cb1d32be2",
+    "last_modified": "2024-08-12 22:18:08+00:00"
+  }
+}

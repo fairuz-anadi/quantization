@@ -1,0 +1,20 @@
+# Pinned loosely on purpose: Kaggle ships its own CUDA-matched torch, and
+# forcing a torch version there breaks the image. Everything else is pinned to
+# a major line that the code has actually been run against.
+#
+# The exact resolved versions of every library are recorded in each run's
+# .meta.json under "env", so a result is always traceable to what produced it.
+
+datasets>=3.0,<6
+transformers>=4.45,<6
+accelerate>=0.34
+bitsandbytes>=0.43        # INT8 + NF4; needs compute capability >= 7.5
+huggingface_hub>=0.25
+
+numpy>=1.26
+pandas>=2.0
+pyyaml>=6.0
+matplotlib>=3.7
+
+peft>=0.13                # Experiment 2 (LoRA) only
+pytest>=8.0

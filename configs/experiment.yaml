@@ -1,0 +1,94 @@
+# quantlang — experiment configuration
+# ===========================================================================
+# THE RULE: no number in this repo is invented.
+#
+# Every field set to `null` below is NOT YET KNOWN. Loader code MUST raise on
+# reading a null — see quantlang/config.py::require(). Do not fill one in by
+# hand from memory, and never substitute a plausible-looking default. Nulls are
+# resolved only by the pinning scripts, which read the value from the source of
+# truth and write it back.
+# ===========================================================================
+
+benchmark:
+  name: belebele
+  hf_dataset: facebook/belebele
+  hf_revision: "7899cdfa4e1e0d733fd77c848e2c273cb1d32be2"   # pinned by scripts/pin_revisions.py
+  split: test
+  # Frozen 2026-08-28. The brief named eng/ben/sin/asm; npi_Deva is carried in
+  # addition, not as a substitute, because CohereForAI/aya_dataset covers
+  # ben/sin/eng/nep but NOT asm. Without npi, one of the four languages could
+  # never enter the fine-tuning experiment at all. Cost is +1 language on P0.
+  languages: [eng_Latn, ben_Beng, sin_Sinh, asm_Beng, npi_Deva]
+  reference_language: eng_Latn
+
+  # BELEBELE ships 900 items per language. Asserted at load time. If a language
+  # yields any other count the run CRASHES; it is never padded or resampled.
+  n_items_per_lang: 900
+
+  # item_id key. The project brief assumed bare `question_number`, but that
+  # field may not be unique within a language (each FLORES passage carries
+  # several questions). scripts/verify_item_ids.py determines the true key
+  # empirically and writes configs/item_id_manifest.json. Until it has run,
+  # this is unknown and every downstream script must refuse to proceed.
+  # RE-VERIFIED 2026-08-28 across all 5 languages after asm_Beng was added.
+  # VERIFIED 2026-08-26 by scripts/verify_item_ids.py. `question_number` alone
+  # takes only 2 distinct values across 900 items and is NOT a key; the brief
+  # was wrong on this point. Composite key confirmed unique per language and
+  # identical across all 4. Row order differs between languages, so every join
+  # keys on item_id explicitly and never on position.
+  item_id_key: "link#question_number"
+
+models:
+  # Frozen 2026-08-28. Qwen2.5-7B was previously pinned here and is REJECTED:
+  # 7B in FP16 is ~15.2 GB against a 15.36 GB T4, so FP16 would have to shard
+  # across 2 GPUs while NF4 (~4.5 GB) runs on one. Comparing latency across
+  # different device topologies is exactly what the brief's timing protocol
+  # forbids. 3B is ~6.2 GB: all three precisions fit one T4.
+  - alias: qwen2.5-3b-instruct
+    hf_id: Qwen/Qwen2.5-3B-Instruct
+    revision: "aa8e72537993ba99e69dfaafa59ed015b17504d1"   # commit SHA, pinned by scripts/pin_revisions.py
+    role: primary
+  # A second model is deliberately NOT listed. It stays out of scope until
+  # model 1's grid is complete. Adding it is a scope decision made in the open,
+  # not a quiet config edit.
+
+precisions: [fp16, int8_llmint8, nf4]
+
+scoring:
+  # letter_logit  : argmax over the 4 option-letter tokens at the answer
+  #                 position. 1 forward pass/item. No parse failures.
+  # option_loglik : length-normalised logprob of each full answer string.
+  #                 4 forward passes/item (~4x GPU cost).
+  # The active value is recorded verbatim in every run manifest, so results
+  # can never be silently compared across a change of method.
+  method: letter_logit
+  option_letters: [A, B, C, D]
+
+  # FROZEN 2026-08-28, before any full-scale result was produced. One template
+  # for every language, every precision, every model. It is never tuned per
+  # condition and never adjusted after seeing accuracy.
+  prompt_template: |
+    {passage}
+    Question: {question}
+    A. {a1}
+    B. {a2}
+    C. {a3}
+    D. {a4}
+    Answer:
+
+  # The template ends with "Answer:" and no trailing space, so the letter the
+  # model would actually emit next is " A", not "A". Scoring bare "A" would
+  # read logits for a token the model was never about to produce. The loader
+  # asserts each prefixed letter is exactly one token and crashes otherwise.
+  option_prefix: " "
+
+  # Passages are long and Sinhala/Assamese tokenise 3-6x English. Truncation is
+  # left-side so the question and the four options are never cut off.
+  max_input_tokens: 4096
+  truncation_side: left
+
+stats:
+  bootstrap_iterations: 10000
+  bootstrap_percentiles: [2.5, 97.5]
+  seed: 20260826
+  multiple_comparison_correction: holm
