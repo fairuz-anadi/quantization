@@ -171,7 +171,8 @@ for name, check in sorted(r["checks"].items()):
     print(f"[{'PASS' if check['pass'] else 'FAIL'}] {name}")
 
 d = r["checks"]["9_ft_arm_differs_from_base_arm"]
-print("\\nFT vs base, max logit delta:", d["max_logit_delta_vs_base"])
+print("\\nFT vs base, max logit delta (fp16 row is the comparable one):")
+print("   ", d["max_logit_delta_vs_base_fp16"])
 print("merge weight delta:", d["merge_weight_delta"])
 print("\\nALL CHECKS PASSED:", r["all_checks_passed"])'''),
         ("markdown", """## Gate

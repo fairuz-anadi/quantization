@@ -258,3 +258,24 @@ def test_torchao_version_is_recorded_in_run_provenance():
     for module in ("evaluate.py", "finetune.py"):
         src = (REPO / "quantlang" / module).read_text(encoding="utf-8")
         assert '"torchao"' in src, module
+
+
+def test_the_notebooks_only_read_keys_the_smoke_test_writes():
+    """A rename in the writer must not leave the reader pointing at nothing.
+
+    This exact bug shipped: `max_logit_delta_vs_base` was renamed to
+    `*_fp16` in run_p1_smoke.py, the notebook's report-reader cell was not
+    updated, and a passing smoke run died on a KeyError while displaying its
+    own result. Cheap to catch, annoying to hit mid-session.
+    """
+    import re
+    gen = (REPO / "scripts" / "make_p1_notebooks.py").read_text(encoding="utf-8")
+    smoke = (REPO / "scripts" / "run_p1_smoke.py").read_text(encoding="utf-8")
+
+    # Keys the notebooks pull off a smoke check dict.
+    referenced = set(re.findall(r'd\["([a-z0-9_]+)"\]', gen))
+    assert referenced, "expected the generator to read some smoke-report keys"
+    for key in referenced:
+        assert f'"{key}"' in smoke, (
+            f"notebooks read check key {key!r}, which run_p1_smoke.py never "
+            f"writes")
