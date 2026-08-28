@@ -29,6 +29,20 @@ from quantlang.config import REPO_ROOT  # noqa: E402
 REPO_URL = "https://github.com/fairuz-anadi/quantization.git"
 OUT_DIR = REPO_ROOT / "notebooks"
 
+
+# A `!command` NEVER raises in Jupyter, so a failing gate scrolls past and Run
+# All carries straight on into the expensive cells. That happened once: twelve
+# failed tests went by and the session continued into a 6 GB model download.
+# Gate cells go through this helper instead, which raises and stops the notebook.
+GATE = (
+    "import subprocess, sys\n"
+    "def gate(*cmd):\n"
+    "    print('$', ' '.join(cmd), flush=True)\n"
+    "    if subprocess.run([sys.executable, *cmd]).returncode != 0:\n"
+    "        raise SystemExit('GATE FAILED: ' + ' '.join(cmd) + '. Stop here -- '\n"
+    "                         'the design is not adjusted to make a check pass.')\n"
+)
+
 SETUP = [
     ("markdown", """# {title}
 
@@ -54,10 +68,23 @@ print(subprocess.run(["git", "-C", SRC, "rev-parse", "HEAD"],
 os.chdir(SRC); sys.path.insert(0, SRC)'''),
     ("code", '# 2. Dependencies. Kaggle\'s torch is CUDA-matched -- never reinstall it.\n'
              '!pip install -q -U "transformers>=4.45" "bitsandbytes>=0.43" "peft>=0.13" '
-             'accelerate datasets pyyaml'),
-    ("code", "# 3. Environment probe. STOP HERE if this exits non-zero.\n"
-             "#    A P100 cannot run INT8 or NF4.\n"
-             "!python scripts/probe_env.py --outdir /kaggle/working"),
+             'accelerate datasets pyyaml\n'
+             '\n'
+             '# torchao is REMOVED, not upgraded. Kaggle ships torchao 0.10.0; a\n'
+             '# current PEFT wants >= 0.16.0, and its is_torchao_available() RAISES\n'
+             '# on an out-of-range version instead of returning False. PEFT probes it\n'
+             '# for every LoRA layer it builds, so with both installed no adapter can\n'
+             '# attach at all and fine-tuning cannot run.\n'
+             '#\n'
+             '# This pipeline never uses torchao -- INT8 and NF4 are both bitsandbytes.\n'
+             '# Upgrading it instead could pull a different torch, which is the one\n'
+             '# thing on Kaggle that must not move.\n'
+             '!pip uninstall -q -y torchao'),
+    ("code", "# 3. Environment probe. Raises and STOPS the notebook if this "
+             "session cannot\n#    run the experiment: a P100 (no INT8/NF4), or "
+             "a PEFT/torchao mismatch\n#    that makes LoRA attachment "
+             "impossible.\n" + GATE +
+             '\ngate("scripts/probe_env.py", "--outdir", "/kaggle/working")'),
 ]
 
 
@@ -98,13 +125,13 @@ results. `pytest` covers the P1 construction, including the checks that version
 1 did not have: the substring shortcut is worth exactly a guess, the gold and
 the distractors are present at the same rate, and the FT arm is verified to
 differ from the Base arm."""),
-        ("code", "!python scripts/freeze_p0.py\n!python -m pytest -q"),
+        ("code", GATE + '\ngate("scripts/freeze_p0.py")\ngate("-m", "pytest", "-q")'),
         ("markdown", """## The corpus reproduces exactly
 
 Re-derives every P1 item from the pinned dataset revision, the frozen
 `split_seed` and the pinned tokenizer, and compares against the frozen digests.
 Downloads the corpus, so it takes a few minutes."""),
-        ("code", "!python scripts/build_p1_splits.py --check"),
+        ("code", GATE + '\ngate("scripts/build_p1_splits.py", "--check")'),
         ("markdown", """## The learnability gate
 
 Two questions, cheapest first.
@@ -114,20 +141,29 @@ Two questions, cheapest first.
    verbatim in the passage", on a 100% gold-presence rate. Version 2 scores
    exactly 0.25 because all four options are present.
 2. **GPU, a few minutes.** How well does the BASE model already do on the P1
-   task, scored by the exact P0 evaluator? The stop threshold is P0's own best
+   task, scored by the exact P0 evaluator? The threshold is P0's own best
    measured cell, read from `results/ALL_P0_RESULTS/tables/accuracy.csv` -- it
-   is not a number chosen here. If the base model is above it, fine-tuning has
-   no headroom and sessions B and C are not worth running."""),
-        ("code", f"!python scripts/check_p1_learnability.py --langs {lang_args} "
-                 f"--outdir /kaggle/working/p1_gate"),
+   is not a number chosen here.
+
+   Measured 2026-08-29: **0.970 English, 0.900 Bangla**, so English trips it.
+   This is a WARNING, passed with `--acknowledge-low-headroom` and recorded in
+   the report. It bounds what the FT arm can show on ACCURACY -- RQ3 is expected
+   to be null for English -- but it does not make the FT arm vacuous: check 9
+   below measures the FT model against the base at matched precision and found a
+   1.14 logit delta from three optimizer steps, against 0.000000 for the invalid
+   v1 run. Empty headroom and an unchanged model are different claims."""),
+        ("code", GATE + f'\ngate("scripts/check_p1_learnability.py", *"--langs {lang_args}".split(), "--outdir", "/kaggle/working/p1_gate", "--acknowledge-low-headroom")'),
         ("markdown", """## The 20-item smoke test
 
 Nine checks. The ninth is new: it compares the fine-tuned logits against the
 base model's. A full English run once passed checks 1-8 while producing logits
 bit-identical to the base model at every precision, because nothing compared the
-two arms."""),
-        ("code", "!python scripts/run_p1_smoke.py --outdir /kaggle/working/p1_smoke "
-                 "--lang eng_Latn"),
+two arms.
+
+Read the **fp16** row of `max_logit_delta_vs_base_fp16`: the baseline is the base
+model at FP16, so only that row isolates fine-tuning. The int8 and nf4 rows carry
+the quantization effect too and rise for that reason alone."""),
+        ("code", GATE + '\ngate("scripts/run_p1_smoke.py", "--outdir", "/kaggle/working/p1_smoke", "--lang", "eng_Latn")'),
         ("code", '''# Read the report.
 import json
 r = json.load(open("/kaggle/working/p1_smoke/p1_smoke_report.json", encoding="utf-8"))
@@ -186,9 +222,8 @@ def session_lang(lang: str, letter: str) -> dict:
             f"exactly one run."),
         repo=REPO_URL)) for k, v in SETUP]
     cells += [
-        ("code", "# 4. The contracts still hold in THIS session.\n"
-                 "!python scripts/freeze_p0.py\n"
-                 "!python -m pytest -q"),
+        ("code", "# 4. The contracts still hold in THIS session.\n" + GATE +
+         '\ngate("scripts/freeze_p0.py")\ngate("-m", "pytest", "-q")'),
         ("markdown", f"""## Fine-tune {lang}
 
 One epoch of LoRA on the FP16 base, then `merge_and_unload` into a plain FP16
@@ -197,8 +232,7 @@ not, this cell fails rather than shipping a checkpoint that is the base model.
 
 The training partition is trimmed to the size shared by both final-scope
 languages, so each arm takes the same number of gradient steps."""),
-        ("code", f"!python scripts/run_finetune.py --lang {lang} "
-                 f"--outdir /kaggle/working/p1 --tag main"),
+        ("code", GATE + f'\ngate("scripts/run_finetune.py", "--lang", "{lang}", "--outdir", "/kaggle/working/p1", "--tag", "main")'),
         ("markdown", f"""## Evaluate the FT arm
 
 Three cells: {lang} x FP16 / INT8 / NF4, on the merged checkpoint, through the

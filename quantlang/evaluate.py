@@ -41,7 +41,12 @@ def _env_metadata() -> dict[str, Any]:
         "torch": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
     }
-    for lib in ("transformers", "bitsandbytes", "accelerate", "datasets", "peft"):
+    # torchao is recorded despite being unused: PEFT's LoRA dispatcher calls
+    # is_torchao_available() unconditionally, and a torchao older than PEFT
+    # expects makes that RAISE rather than return False, which breaks adapter
+    # attachment outright. Its version belongs in the provenance record.
+    for lib in ("transformers", "bitsandbytes", "accelerate", "datasets", "peft",
+                "torchao"):
         try:
             env[f"{lib}_version"] = getattr(__import__(lib), "__version__", "unknown")
         except Exception as exc:  # noqa: BLE001

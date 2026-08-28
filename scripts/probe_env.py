@@ -44,6 +44,23 @@ def main() -> int:
         "cuda_available": torch.cuda.is_available(),
     }
 
+    # PEFT's LoRA dispatcher probes torchao for every layer it builds, and an
+    # out-of-range torchao makes that probe RAISE rather than return False --
+    # so no adapter can attach and fine-tuning cannot run at all. Kaggle ships
+    # torchao 0.10.0 against a current PEFT wanting >= 0.16.0. Checked here, in
+    # the cheapest cell of the session, rather than an hour into training.
+    #
+    # Deliberately BEFORE the CUDA check: it needs no GPU, so it stays useful on
+    # a CPU box and cannot hide behind an unrelated early exit.
+    try:
+        from peft.import_utils import is_torchao_available
+        is_torchao_available()
+        out["peft_lora_dispatch"] = "ok"
+    except ImportError as exc:
+        out["peft_lora_dispatch"] = f"BROKEN: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        out["peft_lora_dispatch"] = f"unknown ({type(exc).__name__}: {exc})"
+
     if not torch.cuda.is_available():
         out.update(ok_for_experiment=False, reason="no CUDA device visible")
         print(json.dumps(out, indent=2))
@@ -97,13 +114,26 @@ def main() -> int:
     out["ok_for_experiment"] = bool(
         out["bnb_int8_supported"] and out["bnb_nf4_supported"]
         and out["bnb_nf4_smoke_test"] == "pass"
+        and out["peft_lora_dispatch"] == "ok"
     )
     if not out["ok_for_experiment"]:
-        out["reason"] = (
-            f"compute capability {min_cap / 10} (need >= {MIN_CAP_BNB / 10}) or the "
-            f"bitsandbytes NF4 smoke test failed. Set the Kaggle accelerator to "
-            f"T4 x2 and restart the session. Do NOT run on a P100."
-        )
+        reasons = []
+        if not (out["bnb_int8_supported"] and out["bnb_nf4_supported"]
+                and out["bnb_nf4_smoke_test"] == "pass"):
+            reasons.append(
+                f"compute capability {min_cap / 10} (need >= {MIN_CAP_BNB / 10}) or "
+                f"the bitsandbytes NF4 smoke test failed. Set the Kaggle "
+                f"accelerator to T4 x2 and restart the session. Do NOT run on a "
+                f"P100.")
+        if out["peft_lora_dispatch"] != "ok":
+            reasons.append(
+                f"PEFT cannot build a LoRA layer here: "
+                f"{out['peft_lora_dispatch']}. torchao is unused by this "
+                f"pipeline (INT8 and NF4 are both bitsandbytes), so REMOVE it "
+                f"rather than upgrading it -- upgrading can pull a different "
+                f"torch, and Kaggle's torch is CUDA-matched:\n"
+                f"    pip uninstall -y torchao")
+        out["reason"] = " | ".join(reasons)
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)

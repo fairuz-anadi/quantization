@@ -103,7 +103,11 @@ def env_metadata() -> dict[str, Any]:
         "torch": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
     }
-    for lib in ("transformers", "peft", "accelerate", "datasets", "bitsandbytes"):
+    # torchao: unused by this pipeline, but PEFT's LoRA dispatcher probes it on
+    # every adapter attachment and an out-of-range version raises. Recorded so a
+    # future breakage is diagnosable from the run manifest alone.
+    for lib in ("transformers", "peft", "accelerate", "datasets", "bitsandbytes",
+                "torchao"):
         try:
             env[f"{lib}_version"] = getattr(__import__(lib), "__version__", "unknown")
         except Exception as exc:  # noqa: BLE001
@@ -179,6 +183,41 @@ def lora_config(cfg: dict[str, Any]):
     )
 
 
+def assert_peft_dispatch_is_usable() -> None:
+    """Fail early, and legibly, on the PEFT/torchao version conflict.
+
+    PEFT builds a fixed list of backend dispatchers for every LoRA layer it
+    creates, and `dispatch_torchao` calls `is_torchao_available()` whether or not
+    torchao is used. That helper does not merely return False for an old
+    torchao -- it RAISES. So an environment carrying torchao below the version
+    PEFT expects cannot attach a LoRA adapter at all, and fails once per target
+    module with a traceback that points at torchao rather than at the mismatch.
+
+    This project never uses torchao; INT8 and NF4 both come from bitsandbytes.
+    The fix is to remove torchao, not to upgrade it -- upgrading it can drag
+    torch, and Kaggle's torch is CUDA-matched and must not be reinstalled:
+
+        pip uninstall -y torchao
+    """
+    try:
+        from peft.import_utils import is_torchao_available
+    except ImportError:
+        return          # older PEFT with no torchao dispatcher at all
+    try:
+        is_torchao_available()
+    except ImportError as exc:
+        raise FineTuneError(
+            f"PEFT cannot attach a LoRA adapter in this environment: {exc}\n"
+            f"torchao is unused by this pipeline -- INT8 and NF4 both come from "
+            f"bitsandbytes -- but PEFT probes it for every LoRA layer and an "
+            f"out-of-range version raises instead of returning False.\n"
+            f"Fix the environment, do not work around it:\n"
+            f"    pip uninstall -y torchao\n"
+            f"Upgrading torchao instead risks pulling a different torch, and "
+            f"Kaggle's torch is CUDA-matched."
+        ) from exc
+
+
 def attach_adapter(cfg: dict[str, Any], base_model):
     """Wrap a base model in a LoRA adapter and report parameter counts.
 
@@ -188,6 +227,7 @@ def attach_adapter(cfg: dict[str, Any], base_model):
     """
     from peft import get_peft_model
 
+    assert_peft_dispatch_is_usable()
     peft_model = get_peft_model(base_model, lora_config(cfg))
     for name, param in peft_model.named_parameters():
         if param.requires_grad:

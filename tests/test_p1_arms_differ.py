@@ -198,3 +198,63 @@ def test_the_smoke_test_compares_the_two_arms():
     src = (REPO / "scripts" / "run_p1_smoke.py").read_text(encoding="utf-8")
     assert "9_ft_arm_differs_from_base_arm" in src
     assert "max_logit_delta_vs_base" in src
+
+
+# --------------------------------------------------------------------------- #
+# the environment must be able to build a LoRA layer at all
+# --------------------------------------------------------------------------- #
+
+def test_an_unusable_peft_dispatch_is_reported_clearly(monkeypatch):
+    """Kaggle ships torchao 0.10.0; a current PEFT wants >= 0.16.0.
+
+    PEFT builds a fixed dispatcher list for every LoRA layer, and
+    `dispatch_torchao` calls `is_torchao_available()` whether or not torchao is
+    used. That helper RAISES on an out-of-range version rather than returning
+    False, so no adapter can attach and fine-tuning cannot run -- with a
+    traceback per target module that blames torchao instead of the mismatch.
+
+    Nothing in this project uses torchao; INT8 and NF4 are both bitsandbytes.
+    """
+    import peft.import_utils as iu
+
+    def boom():
+        raise ImportError(
+            "Found an incompatible version of torchao. Found version 0.10.0, "
+            "but only versions above 0.16.0 are supported")
+
+    monkeypatch.setattr(iu, "is_torchao_available", boom)
+    with pytest.raises(finetune.FineTuneError) as excinfo:
+        finetune.assert_peft_dispatch_is_usable()
+    message = str(excinfo.value)
+    assert "pip uninstall -y torchao" in message, (
+        "the error must name the fix, not just the symptom")
+    assert "bitsandbytes" in message
+
+
+def test_a_usable_dispatch_passes_silently():
+    finetune.assert_peft_dispatch_is_usable()
+
+
+def test_the_guard_runs_before_any_adapter_is_built():
+    """Checked up front, so the failure is one line and not one per layer."""
+    src = inspect.getsource(finetune.attach_adapter)
+    assert "assert_peft_dispatch_is_usable()" in src
+    assert src.index("assert_peft_dispatch_is_usable") < src.index("get_peft_model("), \
+        "the guard must fire before get_peft_model is called"
+
+
+def test_probe_env_fails_the_session_on_a_broken_dispatch():
+    """Session A's cheapest cell must catch this, not hour one of training."""
+    src = (REPO / "scripts" / "probe_env.py").read_text(encoding="utf-8")
+    assert "peft_lora_dispatch" in src
+    assert 'out["peft_lora_dispatch"] == "ok"' in src, (
+        "the dispatch check must gate ok_for_experiment")
+    assert src.index("peft_lora_dispatch") < src.index("no CUDA device visible"), (
+        "the check needs no GPU and must not hide behind the CUDA early exit")
+
+
+def test_torchao_version_is_recorded_in_run_provenance():
+    """So a future breakage is diagnosable from the manifest alone."""
+    for module in ("evaluate.py", "finetune.py"):
+        src = (REPO / "quantlang" / module).read_text(encoding="utf-8")
+        assert '"torchao"' in src, module

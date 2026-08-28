@@ -200,7 +200,12 @@ def main() -> int:
             # slightly can still argmax to the same letter on every item. The
             # LOGIT delta is what distinguishes "fine-tuning changed little"
             # from "these are the base model's weights".
-            "max_logit_delta_vs_base": max(
+            #
+            # ONLY THE fp16 ROW IS A CLEAN FT-vs-BASE COMPARISON. The baseline
+            # is the base model at FP16, so the int8 and nf4 rows measure the
+            # fine-tuning effect AND the quantization effect together, and rise
+            # with quantization aggressiveness for that reason alone.
+            "max_logit_delta_vs_base_fp16": max(
                 (abs(x - y)
                  for a, b in zip(bel, base_scores)
                  for x, y in zip(a["letter_logits"], b["letter_logits"])),
@@ -281,11 +286,13 @@ def main() -> int:
     # to reproduce the base model exactly would differ in the low bits. A delta
     # of zero does not mean fine-tuning had no effect; it means the base weights
     # were scored.
-    deltas = {p: v["max_logit_delta_vs_base"] for p, v in per_precision.items()}
+    deltas = {p: v["max_logit_delta_vs_base_fp16"]
+              for p, v in per_precision.items()}
     fp16_delta = deltas.get("fp16", 0.0)
     report["checks"]["9_ft_arm_differs_from_base_arm"] = {
         "pass": fp16_delta > 0.0,
-        "max_logit_delta_vs_base": deltas,
+        "max_logit_delta_vs_base_fp16": deltas,
+        "comparable_row": "fp16",
         "changed_predictions_vs_base": {
             p: v["changed_vs_base"] for p, v in per_precision.items()},
         "merge_weight_delta": ft_meta["merged_checkpoint"].get("weight_delta"),

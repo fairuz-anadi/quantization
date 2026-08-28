@@ -210,3 +210,60 @@ def test_load_partition_applies_the_cap_not_the_caller():
     # `train_full` stays reachable for diagnostics, and must be asked for by
     # name so it can never be selected by accident.
     assert '"train_full"' in src
+
+
+# --------------------------------------------------------------------------- #
+# low headroom is a WARNING, and passing it is on the record
+# --------------------------------------------------------------------------- #
+
+def test_low_headroom_cannot_be_passed_silently():
+    """The stop became a warning AFTER it fired, which deserves suspicion.
+
+    The justification is that the original rationale -- "do not fine-tune a task
+    the base model already solves" -- tests for accuracy headroom, while P1's
+    estimand is whether a language-adapted model QUANTIZES differently. Those
+    come apart: check 9 measured a 1.14 FT-vs-Base logit delta at matched
+    precision from three optimizer steps, against 0.000000 for the invalid run.
+
+    What must never happen is the warning becoming invisible. Proceeding
+    requires an explicit flag.
+    """
+    src = (REPO / "scripts" / "check_p1_learnability.py").read_text(encoding="utf-8")
+    assert "--acknowledge-low-headroom" in src
+    assert "if not acknowledge:" in src, (
+        "low headroom must still raise unless explicitly acknowledged")
+
+
+def test_the_acknowledgement_is_written_into_the_report():
+    """A reader must be able to tell the limitation was accepted, not missed."""
+    src = (REPO / "scripts" / "check_p1_learnability.py").read_text(encoding="utf-8")
+    assert 'report["low_headroom_acknowledged"]' in src
+    assert 'report["low_headroom_languages"]' in src
+
+
+def test_the_warning_names_the_consequence_for_rq3():
+    """Low headroom bounds an actual claim, and the claim is named."""
+    src = (REPO / "scripts" / "check_p1_learnability.py").read_text(encoding="utf-8")
+    assert "RQ3" in src, (
+        "the warning must say which research question it limits")
+
+
+def test_the_decision_and_its_evidence_are_recorded_in_the_source():
+    """Changing a gate after seeing it fire has to leave a trail."""
+    src = (REPO / "scripts" / "check_p1_learnability.py").read_text(encoding="utf-8")
+    for token in ("0.970", "0.900", "1.14", "0.000000"):
+        assert token in src, (
+            f"the measurement {token} that justified the change must be recorded")
+
+
+def test_the_smoke_delta_says_which_row_is_comparable():
+    """Only fp16-vs-fp16 isolates fine-tuning from quantization.
+
+    The baseline is the base model at FP16, so the int8 and nf4 rows measure the
+    fine-tuning effect AND the quantization effect together and rise with
+    aggressiveness for that reason alone. Reporting them unlabelled invites
+    reading 5.31 as "NF4 fine-tuning changed more".
+    """
+    src = (REPO / "scripts" / "run_p1_smoke.py").read_text(encoding="utf-8")
+    assert "max_logit_delta_vs_base_fp16" in src
+    assert '"comparable_row": "fp16"' in src
