@@ -95,16 +95,38 @@ layer counts, option token ids, prompt-template digest, and the manifest digest.
 
 ## Status
 
-Phase 0 (scaffold, config enforcement, frozen manifest, invariants) and Phase 1
-(evaluation, tidy, statistics, analysis, Kaggle runner) complete. 53 tests pass.
-The full non-GPU chain is verified end to end on synthetic input.
+**P0 — complete and frozen.** The full 15-cell grid (5 languages × 3
+precisions × 900 items) was run on Kaggle T4 and its tables are in
+`results/ALL_P0_RESULTS/tables/`. The design is locked: changing it is a
+scientific decision, not a config edit. `scripts/freeze_p0.py` digests the P0
+subtree of `experiment.yaml` plus the frozen manifest, the pinned revisions,
+the untouched P0 modules and the result tables; `tests/test_p1_freeze.py`
+fails if any of them moves.
 
-**No model has been run under this pipeline yet**; `results/raw/` is empty by
-design. The pilot numbers in the three Kaggle notebooks at
-`fairuz-anadi/quantization` are 120-item exploratory runs with a different
-prompt and a different scored token — they are not comparable to what this
-pipeline produces and are not paper data.
+One gap, stated plainly: the per-item raw output of that run is **not** in the
+repository — `results/ALL_P0_RESULTS/raw/` holds only its README, so `tidy.csv`
+currently has no committed source. Those 30 files are registered in
+`configs/p0_freeze.json` as `null`, meaning NOT YET KNOWN, and are never
+fabricated. Restoring them and re-running `freeze_p0.py --register` pins them.
+
+**P1 — implementation complete, not yet executed.** Language-specific LoRA
+fine-tuning × quantization: `quantlang/p1data.py`, `quantlang/finetune.py`,
+the split builder, the runners and `notebooks/kaggle_p1.ipynb`. The 80/20
+article-grouped split is frozen in `configs/p1_split_manifest.json` and
+reproduces exactly from its pinned dataset revision and seed.
+
+**243 tests pass, 14 skipped** (the skips are opt-in network and CUDA-gated
+tests). P0's original 53 pass unchanged. The full non-GPU chain is verified
+end to end.
+
+**No P1 GPU run has been made.** The mandatory 20-item English smoke test has
+not been executed, so the five-language experiment has not started and no P1
+number exists anywhere in this repository.
+
+The pilot numbers in the three Kaggle notebooks at `fairuz-anadi/quantization`
+are 120-item exploratory runs with a different prompt and a different scored
+token — they are not comparable to what this pipeline produces and are not
+paper data.
 
 Not yet built: FLORES tokenizer fertility (P5; FLORES is a gated dataset and
-needs an HF token with the terms accepted) and the LoRA fine-tuning experiment
-(P2; starts only once P0 is complete and clean).
+needs an HF token with the terms accepted).

@@ -83,12 +83,27 @@ def assert_precision_applied(model, precision: str) -> dict[str, int]:
 
 
 def load(cfg: dict[str, Any], hf_id: str, revision: str, precision: str,
-         device: str = "cuda:0"):
-    """Load tokenizer + model at a pinned revision in the requested precision."""
+         device: str = "cuda:0", local_checkpoint: str | None = None):
+    """Load tokenizer + model at a pinned revision in the requested precision.
+
+    `local_checkpoint` (P1 only) loads a merged fine-tuned checkpoint from disk
+    instead of the Hub. Everything downstream is identical -- same quantization
+    kwargs, same single-device pinning, same `assert_precision_applied` -- so
+    "the FT model in NF4" is produced by exactly the operation that produced
+    "the base model in NF4" in P0. That is what makes the two arms comparable.
+
+    Leaving it None reproduces P0's behaviour exactly, byte for byte.
+    """
     if precision not in PRECISIONS:
         raise ValueError(f"unknown precision {precision!r}")
 
-    tok = AutoTokenizer.from_pretrained(hf_id, revision=revision)
+    # A merged checkpoint carries its own tokenizer, saved alongside the weights
+    # by finetune.merge_and_save. Reading it from the Hub instead would risk
+    # scoring with a tokenizer the weights were never trained against.
+    source = local_checkpoint if local_checkpoint else hf_id
+    tok_revision = None if local_checkpoint else revision
+
+    tok = AutoTokenizer.from_pretrained(source, revision=tok_revision)
     tok.truncation_side = cfg_mod.require(cfg, "scoring.truncation_side")
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -96,7 +111,7 @@ def load(cfg: dict[str, Any], hf_id: str, revision: str, precision: str,
     kwargs = _quant_kwargs(precision)
     # device_map pins every layer to ONE device. See module docstring.
     kwargs["device_map"] = {"": device}
-    model = AutoModelForCausalLM.from_pretrained(hf_id, revision=revision,
+    model = AutoModelForCausalLM.from_pretrained(source, revision=tok_revision,
                                                  low_cpu_mem_usage=True, **kwargs)
     model.eval()
     layer_counts = assert_precision_applied(model, precision)

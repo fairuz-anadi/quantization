@@ -92,3 +92,170 @@ stats:
   bootstrap_percentiles: [2.5, 97.5]
   seed: 20260826
   multiple_comparison_correction: holm
+
+# ===========================================================================
+# P1 -- language-specific fine-tuning x quantization.  ADDITIVE ONLY.
+#
+# Nothing above this line may be edited by P1 work. scripts/freeze_p0.py
+# digests the P0 subtree (benchmark, models, precisions, scoring, stats) and
+# tests/test_p1_freeze.py fails if any of it moves. Adding this new top-level
+# key does not change that digest -- that is the point of the boundary.
+#
+# P1 reuses P0's scoring block verbatim: same prompt_template, same
+# option_letters, same option_prefix, same letter_logit method. A fine-tuned
+# model is scored by exactly the code that scored the base model, so the only
+# thing that differs between the Base and FT arms is the weights.
+# ===========================================================================
+finetune:
+  # Frozen 2026-08-28. multi-wiki-qa is the only dataset found that covers all
+  # five languages without contaminating the evaluation set.
+  #
+  # SIB-200 was REJECTED. It has the same five FLORES config names and shipped
+  # train/val/test splits, which makes it the obvious choice, but it is built
+  # from FLORES-200 sentences and so is BELEBELE: 600 of its 701 English
+  # training sentences (85.6%) appear VERBATIM inside BELEBELE evaluation
+  # passages, touching 305 of the 488 unique passages. Fine-tuning on it means
+  # training on the text of the eval set.
+  #
+  # multi-wiki-qa was checked the same way: 0 of 33,657 English context
+  # sentences appear in any BELEBELE passage, and 0 BELEBELE passages appear in
+  # any sampled context. Source is Wikipedia; BELEBELE/FLORES draw from
+  # Wikinews, Wikijunior, Wikivoyage and Wikibooks.
+  train_dataset: alexandrainst/multi-wiki-qa
+  hf_revision: "9bdb3350487e399bd1cd873e1395290d636db5ce"   # verified on the Hub
+  split: train
+  license: cc-by-nc-sa-4.0   # non-commercial; fine for the paper, constrains adapter release
+
+  # BELEBELE language code -> multi-wiki-qa config name. Keys must match
+  # benchmark.languages exactly; config.py enforces that.
+  lang_configs:
+    eng_Latn: en
+    ben_Beng: bn
+    sin_Sinh: si
+    npi_Deva: ne
+    asm_Beng: as
+
+  # ---- the 80/20 split -----------------------------------------------------
+  # GROUPED BY ARTICLE, never by row. multi-wiki-qa carries several questions
+  # per Wikipedia article over one shared `context`. Measured on 1,000 English
+  # rows: 122 articles, mean 8.2 questions each, and EVERY article had more
+  # than one question. A row-level random split would leak the context between
+  # train and held-out for essentially every article -- the same class of bug
+  # as keying BELEBELE on `question_number` alone.
+  group_key: title
+  train_fraction: 0.8
+  item_id_separator: "#"
+
+  # Frozen once. Both training seeds below share this split and these MCQ
+  # items, so the seed-sensitivity probe varies ONLY the training run and never
+  # the data it sees.
+  split_seed: 20260828
+
+  # ---- MCQ construction ----------------------------------------------------
+  # multi-wiki-qa ships extractive answer spans. P1 turns each into a 4-option
+  # item rendered through P0's frozen prompt_template, and the training loss
+  # covers the answer-letter token only. Training therefore teaches exactly the
+  # behaviour letter_logit scores, which is what keeps fine-tuned accuracy away
+  # from the 0.25 chance floor where a quantization contrast stops being
+  # measurable.
+  n_options: 4
+  distractors:
+    # Distractors come from OTHER articles, so they cannot be a second
+    # defensible answer to the same context.
+    exclude_same_article: true
+
+    # ...but "other article" alone is not enough. Drawing uniformly from the
+    # whole language produced items like
+    #     Q: Why were the Ohio National Guard troops activated in May 1864?
+    #     A. protect railroads and supply points   <- gold
+    #     B. R. Bridgman of Lichfield
+    #     C. University of Alabama Press
+    #     D. Indian Institute of Science
+    # where the correct option is identifiable from semantic type without
+    # reading the passage. Training on that teaches a shortcut, not reading
+    # comprehension in the target language.
+    #
+    # Distractors are therefore drawn from the topically NEAREST other articles
+    # (cosine over tf-idf profiles of the article contexts), so an option is
+    # wrong on the facts rather than wrong on the category.
+    neighbour_articles: 25
+
+    # Surface shape (numeric-or-not, word-count bucket) is a tie-breaker WITHIN
+    # that topical set, never the primary filter. Applied on its own it made
+    # items worse, not better: a gold containing a digit pulled three dates and
+    # became the only non-date option.
+    match_surface_type: true
+    length_buckets: [1, 3, 7]   # word-count upper bounds; last bucket is 8+
+
+  # Held-out is capped so its n matches BELEBELE's 900 exactly, which makes the
+  # two surfaces' Wilson intervals directly comparable. Selection is a frozen
+  # deterministic subsample recorded in configs/p1_split_manifest.json.
+  heldout_eval_cap: 900
+
+  # ---- context window ------------------------------------------------------
+  # FROZEN 2026-08-28, before the resulting statistics were measured.
+  #
+  # multi-wiki-qa contexts are whole Wikipedia articles, not passages. Measured
+  # against the real tokenizer, median P1 prompts run 830 tokens (English) to
+  # 3,132 (Assamese) -- so relying on left-truncation to fit max_seq_tokens
+  # destroyed the evidence for 61% of items overall, and the loss was severely
+  # LANGUAGE-CORRELATED: 20% for English against 78% for Assamese. Training on
+  # that teaches guessing, worst for exactly the low-resource languages whose
+  # behaviour delta(L,Q) is meant to characterise.
+  #
+  # The window is centred on the answer span, which multi-wiki-qa locates with
+  # `answer_start` -- verified exact on 3,000/3,000 rows across all five
+  # languages.
+  #
+  # The budget is in TOKENS and is THE SAME NUMBER FOR EVERY LANGUAGE. A fixed
+  # CHARACTER window was rejected: at 1,500 characters English yields 348
+  # median tokens against Sinhala's 2,110, so it would hand English roughly
+  # four times the evidence for the same compute. Equalising the token budget
+  # equalises the evidence budget the model actually gets to read.
+  context_window:
+    policy: answer_centred_tokens
+    algorithm_version: 1
+
+    # Reserved for the passage. The rest of max_seq_tokens covers the question,
+    # the four options, the template scaffolding and the answer label. The
+    # effective budget is computed per item from its own measured overhead --
+    # never assumed -- and the final prompt length is verified, not predicted.
+    context_budget_tokens: 800
+
+    # Windows are moved outward to whitespace so the passage does not begin or
+    # end mid-word. The trim may never cut into the answer span itself.
+    trim_to_whitespace: true
+
+  # ---- training ------------------------------------------------------------
+  # FP16 base -> LoRA -> merge -> quantize. Never LoRA on a quantized base:
+  # that produces a mixed-precision object whose quantization effect is a
+  # different estimand from P0's.
+  train_precision: fp16
+  seeds:
+    main: 20260828
+    sensitivity: 20260829
+    # Second seed runs for these two only -- the accuracy extremes. This is a
+    # sensitivity probe, not an additional experimental cell.
+    sensitivity_languages: [eng_Latn, sin_Sinh]
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+  training:
+    epochs: 1
+    learning_rate: 0.0002
+    lr_scheduler: cosine
+    warmup_ratio: 0.03
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+    gradient_checkpointing: true
+    optim: adamw_torch
+    max_grad_norm: 1.0
+    # Tighter than scoring.max_input_tokens (4096) because a 3B FP16 base plus
+    # a 151,936-wide logit tensor has to fit one T4. Truncation side is taken
+    # from scoring.truncation_side (left), so the question and the four options
+    # are never cut off -- the same guarantee P0 evaluation relies on.
+    max_seq_tokens: 1024

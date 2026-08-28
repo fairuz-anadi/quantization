@@ -1,0 +1,206 @@
+{
+  "registered_at_utc": "2026-08-28T08:33:16.815364+00:00",
+  "registered_by": "scripts/freeze_p0.py",
+  "digest_note": "sha256 over newline-normalised bytes (CRLF -> LF). Raw-byte digests would depend on git's checkout, not on content.",
+  "config_p0_subtree": {
+    "keys": [
+      "benchmark",
+      "models",
+      "precisions",
+      "scoring",
+      "stats"
+    ],
+    "canonicalisation": "json.dumps(sort_keys=True, separators=(',',':'))",
+    "sha256": "4c04911a042ab466d3547a9f1c95e31bc7dbf2e53fbb729b9b1a94440145a537",
+    "note": "Covers P0's VALUES only. A new top-level key such as `finetune` does not change this digest; editing a P0 value does."
+  },
+  "strict_files": {
+    "configs/item_id_manifest.json": {
+      "sha256": "d6519d718bd04ee25fed68bcb16dad938bb3bfdfea2bf9870893d6a7af4f9f82",
+      "status": "present"
+    },
+    "configs/revisions.json": {
+      "sha256": "b90f8e1b38e2a98665964ad0c0dd9ac91f33d93a02ddd367342c26a71e0acb9d",
+      "status": "present"
+    },
+    "quantlang/data.py": {
+      "sha256": "8404cd76600afb4b670f8315e5a6ad8695056b143bffe9c2da13d68aee9281e2",
+      "status": "present"
+    },
+    "quantlang/schema.py": {
+      "sha256": "a5ceba6ed127929d98cf3f19bb8ae3ac0e6399dceae507ec137c5b51eecc0af1",
+      "status": "present"
+    },
+    "quantlang/statistics.py": {
+      "sha256": "7e18a63e056119963092813906b62d73c4e6613460d8b163ddd6c0e698e197ff",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/tidy.csv": {
+      "sha256": "e58be14b3fabf06ac8c2d889e403b00c40fc4dfa6c47939615f96875fbafc289",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/accuracy.csv": {
+      "sha256": "3d517bbcb9736f3e613ff37f7cc993e21a4ff370f1b613c850dac1ab7eea69c4",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/degradation.csv": {
+      "sha256": "983e43c956c1ad8f8fddbf2cb5282ff0d9705e08fd4cb0d84cb143e61633866d",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/interaction.csv": {
+      "sha256": "f065883f9679e35ac44a144fafb8fe67bc5b6c9f9e44964731bca0a4a414504c",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/latency.csv": {
+      "sha256": "9eae9a1b039746e4fced6833230ea1b1f6bf6991d37a406a8c0bc71f722ef4ab",
+      "status": "present"
+    },
+    "results/ALL_P0_RESULTS/tables/summary.txt": {
+      "sha256": "084cde5dde980915c5fcaf45f9270d2753ec0be550da5137a04c9177230e8dcc",
+      "status": "present"
+    }
+  },
+  "additive_files": {
+    "note": "P0 baseline digests, recorded for the record. P1 may extend these additively (brief section 11). Byte drift here is NOT a guard failure; tests/test_p1_freeze.py pins the P0-relevant behaviour instead.",
+    "files": {
+      "quantlang/config.py": {
+        "sha256": "eca2fada61f3be891ddd9365ce242ec8d64017ae5cbff9d0baf292ec806fdcb3",
+        "status": "present"
+      },
+      "quantlang/model.py": {
+        "sha256": "6411836a5a0822a566b3646c491240422c5ef0410cc88df1d1f5b2d357ee2374",
+        "status": "present"
+      },
+      "quantlang/evaluate.py": {
+        "sha256": "877c9fc60ff44b843bec95e97e2a25be21ecd8cf3eb864f5e32fe97749e9398f",
+        "status": "present"
+      }
+    }
+  },
+  "p0_raw_provenance": {
+    "note": "The real P0 Kaggle run's per-item output is not committed: results/ALL_P0_RESULTS/raw/ holds only its README, so results/ALL_P0_RESULTS/tables/tidy.csv has no committed source. Entries below are null (NOT YET KNOWN) until the actual files are restored. Re-run `python scripts/freeze_p0.py --register` to register them. Nothing here is ever fabricated.",
+    "tag": "p0",
+    "files": {
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__fp16.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__fp16.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__fp16.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__fp16.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__fp16.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__fp16.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__fp16.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__fp16.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__fp16.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__fp16.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__int8_llmint8.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__int8_llmint8.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__int8_llmint8.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__int8_llmint8.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__int8_llmint8.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__int8_llmint8.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__int8_llmint8.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__int8_llmint8.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__int8_llmint8.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__int8_llmint8.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__nf4.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__eng_Latn__nf4.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__nf4.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__ben_Beng__nf4.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__nf4.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__sin_Sinh__nf4.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__nf4.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__asm_Beng__nf4.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__nf4.jsonl": {
+        "sha256": null,
+        "status": "MISSING"
+      },
+      "results/ALL_P0_RESULTS/raw/p0__qwen2.5-3b-instruct__npi_Deva__nf4.meta.json": {
+        "sha256": null,
+        "status": "MISSING"
+      }
+    }
+  }
+}
