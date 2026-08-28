@@ -1,8 +1,9 @@
 """The mandatory 20-item P1 smoke test. Run this before any full language.
 
-Section 9 of the P1 brief lists eight things that must be true before a
-five-language run is worth starting. This script checks all eight and writes a
-report; it returns non-zero if any of them fails, so it can gate a notebook.
+Section 9 of the P1 brief lists eight things that must be true before a full
+run is worth starting. This script checks those eight plus one the brief did not
+have, and writes a report; it returns non-zero if any of them fails, so it can
+gate a notebook.
 
   1. training completes
   2. the adapter is actually applied
@@ -12,6 +13,10 @@ report; it returns non-zero if any of them fails, so it can gate a notebook.
   6. answer-letter behaviour remains meaningful
   7. no silent FP16 fallback when quantization is requested
   8. no BELEBELE training data is involved
+  9. the FT arm actually differs from the Base arm
+
+Check 9 was added after a full English run passed checks 1-8 while producing
+"fine-tuned" logits bit-identical to the base model's. See its comment below.
 
 Output goes to --outdir, never to results/raw/. A 20-item run is a smoke test
 and can never form a P1 cell.
@@ -191,6 +196,15 @@ def main() -> int:
                 for r in bel + held),
             "changed_vs_base": sum(
                 1 for a, b in zip(bel, base_scores) if a["pred"] != b["pred"]),
+            # Predictions are a coarse instrument: a model whose logits moved
+            # slightly can still argmax to the same letter on every item. The
+            # LOGIT delta is what distinguishes "fine-tuning changed little"
+            # from "these are the base model's weights".
+            "max_logit_delta_vs_base": max(
+                (abs(x - y)
+                 for a, b in zip(bel, base_scores)
+                 for x, y in zip(a["letter_logits"], b["letter_logits"])),
+                default=0.0),
         }
         print(f"    belebele acc={per_precision[precision]['belebele_accuracy']:.2f} "
               f"heldout acc={per_precision[precision]['heldout_accuracy']:.2f} "
@@ -254,6 +268,31 @@ def main() -> int:
         "layer_counts": {p: v["layer_counts"] for p, v in per_precision.items()},
         "peak_memory_allocated_gb": {
             p: v["peak_memory_allocated_gb"] for p, v in per_precision.items()},
+    }
+
+    # ---- check 9: the FT arm is not secretly the Base arm ------------------- #
+    # This check is why the list is nine long instead of eight. A completed
+    # English P1 run -- fine-tune, merge, three precisions, ~99 GPU-minutes --
+    # produced "fine-tuned" logits that were bit-identical to the base model's
+    # on all 900 BELEBELE items at every precision, maximum difference
+    # 0.000000. Nothing failed, because nothing compared the two arms.
+    #
+    # Merging a trained LoRA perturbs FP16 weights. Even an adapter that learned
+    # to reproduce the base model exactly would differ in the low bits. A delta
+    # of zero does not mean fine-tuning had no effect; it means the base weights
+    # were scored.
+    deltas = {p: v["max_logit_delta_vs_base"] for p, v in per_precision.items()}
+    fp16_delta = deltas.get("fp16", 0.0)
+    report["checks"]["9_ft_arm_differs_from_base_arm"] = {
+        "pass": fp16_delta > 0.0,
+        "max_logit_delta_vs_base": deltas,
+        "changed_predictions_vs_base": {
+            p: v["changed_vs_base"] for p, v in per_precision.items()},
+        "merge_weight_delta": ft_meta["merged_checkpoint"].get("weight_delta"),
+        "note": ("Compared at FP16, where the only difference from the base "
+                 "model is the merged adapter. A delta of exactly 0.0 means the "
+                 "FT cell IS the Base cell and every downstream contrast is "
+                 "vacuous."),
     }
 
     # ---- verdict ------------------------------------------------------------ #

@@ -109,19 +109,49 @@ currently has no committed source. Those 30 files are registered in
 `configs/p0_freeze.json` as `null`, meaning NOT YET KNOWN, and are never
 fabricated. Restoring them and re-running `freeze_p0.py --register` pins them.
 
-**P1 — implementation complete, not yet executed.** Language-specific LoRA
-fine-tuning × quantization: `quantlang/p1data.py`, `quantlang/finetune.py`,
-the split builder, the runners and `notebooks/kaggle_p1.ipynb`. The 80/20
-article-grouped split is frozen in `configs/p1_split_manifest.json` and
-reproduces exactly from its pinned dataset revision and seed.
+**P1 — rebuilt at algorithm_version 2, not yet executed.** Language-specific
+LoRA fine-tuning × quantization, reduced to **English + Bangla** (a 2 × 2 × 3
+grid: Base/FT × eng/ben × FP16/INT8/NF4). Six of those twelve cells — the Base
+arm — are the P0 results above and need no further GPU time.
 
-**243 tests pass, 14 skipped** (the skips are opt-in network and CUDA-gated
-tests). P0's original 53 pass unchanged. The full non-GPU chain is verified
+**Version 1 of the P1 corpus was invalid and every result built on it is
+excluded.** It centred the passage window on the gold answer span and drew
+distractors from *other* articles, so the gold was in the passage 100% of the
+time and a distractor essentially never was. "Choose the option that appears
+verbatim in the passage" scored ~0.96 (English) and ~0.92 (Bangla): the task was
+solvable without reading, and solvable to a *language-dependent* degree, sitting
+directly on the interaction P1 exists to measure. Version 2 draws distractors
+from the item's **own** article and places the window over the span covering all
+four options, so presence is constant across options and the substring heuristic
+scores exactly **0.25 in both languages**.
+
+Raising `max_seq_tokens` from 1024 to 2048 was required to make that
+language-neutral — at 1024 the construction succeeds for 97.9% of English rows
+against 74.8% of Bangla's — and costs ~nothing (1.00× / 1.02× total training
+tokens, because batch size is 1 and only the overflowing tail gets longer). The
+two training partitions are trimmed to a common 3,732 items so neither arm sees
+more data than the other. `configs/p1_split_manifest.json` reproduces exactly
+from its pinned dataset revision, seed and tokenizer.
+
+Two pipeline gaps were closed alongside it. `evaluate_cell` had no way to load a
+merged fine-tuned checkpoint, so the one full P1 evaluation ever run was driven
+by ad-hoc notebook code that scored the *base* model — its "fine-tuned" logits
+were bit-identical to the base model's at every precision. `run_eval.py` now
+takes `--local-checkpoint`/`--ft-lang`, every result row records `arm` and
+`weights_from`, `merge_and_save` proves the merge moved the weights, and the
+smoke test compares the two arms directly.
+
+**246 tests pass, 14 skipped** (the skips are opt-in network and CUDA-gated
+tests). P0's original 53 pass unchanged and `freeze_p0.py` reports the P0 config
+subtree and every strict file byte-identical. The full non-GPU chain is verified
 end to end.
 
-**No P1 GPU run has been made.** The mandatory 20-item English smoke test has
-not been executed, so the five-language experiment has not started and no P1
-number exists anywhere in this repository.
+**No P1 GPU run has been made.** Run `notebooks/kaggle_p1_A_validate.ipynb`
+first: it re-derives the corpus, runs the learnability gate — which stops the
+project if the base model already solves the P1 task, against a ceiling read
+from P0's own best cell rather than chosen by hand — and runs the nine-check
+smoke test. Only then are sessions B and C worth starting. No P1 number exists
+anywhere in this repository.
 
 The pilot numbers in the three Kaggle notebooks at `fairuz-anadi/quantization`
 are 120-item exploratory runs with a different prompt and a different scored

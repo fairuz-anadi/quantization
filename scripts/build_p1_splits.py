@@ -43,6 +43,35 @@ from quantlang.config import REPO_ROOT  # noqa: E402
 # is wide on purpose: it is a tripwire for a broken split, not a target.
 ROW_FRACTION_BAND = (0.70, 0.90)
 
+# ---- the acceptance gates for algorithm_version 2 -------------------------- #
+#
+# Version 1 shipped an item set that was solvable without reading the passage,
+# and nothing in the pipeline noticed, because nothing in the pipeline measured
+# it. These are the measurements that would have caught it.
+
+# "Choose the option that appears verbatim in the passage" must be worth no more
+# than a guess. v1 scored ~0.96 (English) / ~0.92 (Bangla) here. Under v2 every
+# option is present, so the exact value is 0.25 and the tolerance covers nothing
+# but arithmetic.
+SHORTCUT_ACCURACY_CEILING = 0.30
+
+# The gold and a distractor must be present at the SAME rate. A gap here is the
+# shortcut in its raw form, before any tie-breaking.
+MAX_PRESENCE_GAP = 0.01
+
+# Drop rates may differ between languages -- Bangla articles tokenise ~3.6x
+# longer -- but not so far that the surviving items are a differently selected
+# sample per language. Measured at max_seq_tokens=2048: 0.7% English, 6.5%
+# Bangla. This bounds the SPREAD across the final-scope languages, which is the
+# comparison that a per-language ceiling cannot make.
+MAX_DROP_RATE_SPREAD = 0.10
+
+# No option position may carry a usable cue. Uniform is 0.25; this allows real
+# sampling wobble while still failing a construction that systematically parks
+# the gold first or last, either among the letters or among the option spans as
+# they appear in the passage.
+MAX_POSITION_SHARE = 0.40
+
 
 def _rel(p: Path) -> str:
     """Display path relative to the repo when possible; absolute otherwise."""
@@ -50,6 +79,100 @@ def _rel(p: Path) -> str:
         return str(Path(p).resolve().relative_to(REPO_ROOT))
     except ValueError:
         return str(Path(p).resolve())
+
+
+def assert_construction_is_honest(lang: str, built: dict) -> None:
+    """Refuse to freeze an item set that can be solved without reading it.
+
+    Version 1 passed every check the pipeline had -- four options present, gold
+    letter consistent, adapter attaching, quantization applying, digests stable
+    -- while being ~96% solvable by substring presence alone. Structural checks
+    cannot catch that. These are behavioural.
+    """
+    for partition in ("train", "heldout"):
+        d = built["diagnostics"][partition]
+        where = f"{lang}/{partition}"
+        if d["n_items"] == 0:
+            raise SystemExit(f"FATAL: {where}: no items were built.")
+
+        if d["lexical_shortcut_accuracy"] > SHORTCUT_ACCURACY_CEILING:
+            raise SystemExit(
+                f"FATAL: {where}: 'choose the option that appears in the "
+                f"passage' scores {d['lexical_shortcut_accuracy']:.3f}, above "
+                f"{SHORTCUT_ACCURACY_CEILING}. The task is solvable without "
+                f"reading. This is the exact failure that invalidated "
+                f"algorithm_version 1; do not raise the ceiling."
+            )
+        gap = abs(d["gold_in_context_rate"] - d["distractor_in_context_rate"])
+        if gap > MAX_PRESENCE_GAP:
+            raise SystemExit(
+                f"FATAL: {where}: the gold is present in the passage "
+                f"{d['gold_in_context_rate']:.1%} of the time and a distractor "
+                f"{d['distractor_in_context_rate']:.1%} -- a {gap:.1%} gap. "
+                f"Presence must carry no information about which option is "
+                f"correct."
+            )
+        if d["same_article_distractor_rate"] < 1.0:
+            raise SystemExit(
+                f"FATAL: {where}: only "
+                f"{d['same_article_distractor_rate']:.1%} of items draw every "
+                f"distractor from their own article. An answer from another "
+                f"article is not in this passage."
+            )
+        if d["n_items_with_duplicate_options"]:
+            raise SystemExit(
+                f"FATAL: {where}: {d['n_items_with_duplicate_options']} item(s) "
+                f"have duplicate options, so more than one letter is defensible.")
+        if d["option_counts"] != [4]:
+            raise SystemExit(
+                f"FATAL: {where}: option counts {d['option_counts']}, expected "
+                f"exactly [4].")
+
+        letter_share = (max(d["gold_letter_distribution"].values())
+                        / d["n_items"])
+        if letter_share > MAX_POSITION_SHARE:
+            raise SystemExit(
+                f"FATAL: {where}: one answer letter takes {letter_share:.1%} of "
+                f"the golds, above {MAX_POSITION_SHARE:.0%}. Always answering "
+                f"that letter would beat reading.")
+        rank_share = max(d["gold_position"]["share_by_rank"].values())
+        if rank_share > MAX_POSITION_SHARE:
+            raise SystemExit(
+                f"FATAL: {where}: the gold is the {rank_share:.1%}-most common "
+                f"option at one position in the passage, above "
+                f"{MAX_POSITION_SHARE:.0%}. A span-covering window must not "
+                f"leave the gold at a predictable place in the passage."
+            )
+
+
+def assert_drop_rates_are_comparable(cfg: dict, languages: dict) -> None:
+    """The drop rate may vary between languages, but not by enough to matter.
+
+    A per-language ceiling cannot see this. If English keeps 99% of its rows and
+    Bangla 75%, the two training sets are differently selected samples and
+    "fine-tuning helped English more" stops being separable from "Bangla trained
+    on a different kind of article". That is a cross-language comparison, so it
+    is made here, once, with every language in hand.
+    """
+    scope = [l for l in cfg_mod.require(cfg, "finetune.final_scope_languages")
+             if l in languages]
+    if len(scope) < 2:
+        return
+    rates = {l: languages[l]["construction_diagnostics"]["train"]["drop_rate"]
+             for l in scope}
+    spread = max(rates.values()) - min(rates.values())
+    print(f"\ndrop rates across the final scope: "
+          + ", ".join(f"{l} {r:.1%}" for l, r in sorted(rates.items()))
+          + f"  (spread {spread:.1%})")
+    if spread > MAX_DROP_RATE_SPREAD:
+        raise SystemExit(
+            f"FATAL: construction drop rates across {scope} span {spread:.1%}, "
+            f"above the {MAX_DROP_RATE_SPREAD:.0%} ceiling: {rates}. The "
+            f"surviving items are a differently selected sample per language, "
+            f"which is a confound sitting directly on the quantity P1 measures. "
+            f"Raise finetune.training.max_seq_tokens, or reduce the scope -- do "
+            f"not raise this ceiling."
+        )
 
 
 def build_all(cfg: dict, langs: list[str]) -> dict:
@@ -94,11 +217,22 @@ def build_all(cfg: dict, langs: list[str]) -> dict:
                   f"({total_d / built['report']['n_source_rows_used']:.2%}) whose "
                   f"question+options alone exceed max_seq_tokens")
         print(f"    evidence kept : train "
-              f"{built['window']['train']['evidence_retained']:.1%} / held out "
-              f"{built['window']['heldout']['evidence_retained']:.1%}")
+              f"{built['window']['train']['all_options_retained']:.1%} / held out "
+              f"{built['window']['heldout']['all_options_retained']:.1%}"
+              f"  (items whose passage contains ALL FOUR options)")
+        d = built["diagnostics"]["train"]
+        print(f"    shortcut acc  : {d['lexical_shortcut_accuracy']:.4f} "
+              f"(gold present {d['gold_in_context_rate']:.1%}, distractor "
+              f"present {d['distractor_in_context_rate']:.1%})")
+        print(f"    gold position : letters "
+              f"{max(d['gold_letter_distribution'].values()) / d['n_items']:.1%} max, "
+              f"passage order {max(d['gold_position']['share_by_rank'].values()):.1%} max")
         print(f"    train digest  : {built['train_digest'][:16]}...")
 
+        assert_construction_is_honest(lang, built)
+
         languages[lang] = {
+            "construction_diagnostics": built["diagnostics"],
             "config": rep["config"],
             "n_source_rows_total": rep["n_source_rows_total"],
             "n_source_rows_dropped_empty": rep["n_source_rows_dropped_empty"],
@@ -126,7 +260,26 @@ def build_all(cfg: dict, langs: list[str]) -> dict:
             "heldout_eval_gold": built["heldout_eval_gold"],
         }
 
+    assert_drop_rates_are_comparable(cfg, languages)
+
+    # The common training-set size is a property OF the built languages, so it
+    # can only be computed once every one of them exists. It is recorded here
+    # and read back by p1data.load_partition, so no training run can pick it up
+    # from anywhere else.
     ft = cfg_mod.require(cfg, "finetune")
+    scope = [l for l in ft["final_scope_languages"] if l in languages]
+    if ft["equalise_train_partition"] and len(scope) == len(
+            ft["final_scope_languages"]):
+        cap = min(languages[l]["n_train_items"] for l in scope)
+        for lang in languages:
+            entry = languages[lang]
+            entry["n_train_items_equalised"] = (
+                min(cap, entry["n_train_items"]) if lang in scope
+                else entry["n_train_items"])
+        print(f"\nequalised training size across {scope}: {cap} items "
+              + ", ".join(f"({l} built {languages[l]['n_train_items']})"
+                          for l in scope))
+
     manifest = {
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "built_by": "scripts/build_p1_splits.py",
@@ -148,17 +301,24 @@ def build_all(cfg: dict, langs: list[str]) -> dict:
         "prompt_template_sha256": hashlib.sha256(
             cfg_mod.require(cfg, "scoring.prompt_template").encode("utf-8")
         ).hexdigest(),
+        "final_scope_languages": ft["final_scope_languages"],
+        "equalise_train_partition": ft["equalise_train_partition"],
         "note": (
-            "The split is grouped by article, never by row. Distractors come "
-            "from other articles within the SAME partition only. Passages are "
-            "answer-centred token windows measured with the tokenizer named "
-            "above -- never left-truncated, which lost the evidence for 61% of "
-            "items and did so at rates from 20% (English) to 78% (Assamese). "
-            "Items are rebuilt deterministically from (dataset revision, "
-            "split_seed, tokenizer) and checked against the digests here; they "
-            "are not stored inline. `*_choices_sha256` covers item ids, gold "
-            "letters and option text only, so it is invariant to the passage "
-            "representation and pins the selection policy on its own."
+            "algorithm_version 2. The split is grouped by article, never by "
+            "row. Distractors are the answers to OTHER questions about the "
+            "SAME article, and the passage is the token window that covers all "
+            "four option spans, expanded outward to context_budget_tokens. "
+            "Every option is therefore a verbatim substring of the passage and "
+            "'choose the option that appears in the passage' scores exactly "
+            "0.25 in every language. Version 1 centred the window on the gold "
+            "instead and drew distractors from other articles, which made that "
+            "same heuristic worth ~96% (English) and ~92% (Bangla); no v1 item "
+            "set or result is admissible. Items are rebuilt deterministically "
+            "from (dataset revision, split_seed, tokenizer) and checked against "
+            "the digests here; they are not stored inline. `*_choices_sha256` "
+            "covers item ids, gold letters and option text only, so it is "
+            "invariant to the passage representation and pins the selection "
+            "policy on its own."
         ),
         "languages": languages,
     }
@@ -169,7 +329,7 @@ def build_all(cfg: dict, langs: list[str]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--langs", nargs="+", default=None,
-                    help="defaults to every language in benchmark.languages")
+                    help="defaults to finetune.final_scope_languages")
     ap.add_argument("--check", action="store_true",
                     help="rebuild and verify against the frozen manifest; "
                          "writes nothing")
@@ -178,7 +338,12 @@ def main() -> int:
 
     cfg = cfg_mod.load()
     known = cfg_mod.require(cfg, "benchmark.languages")
-    langs = args.langs or known
+    scope = cfg_mod.require(cfg, "finetune.final_scope_languages")
+    # The P1 CORPUS covers the final-scope languages, not all of
+    # benchmark.languages. P0 evaluated five and those results stand; P0 reads
+    # configs/item_id_manifest.json and never touches this file, so narrowing
+    # the P1 corpus cannot reach it.
+    langs = args.langs or scope
     unknown = [l for l in langs if l not in known]
     if unknown:
         raise SystemExit(
@@ -208,16 +373,17 @@ def main() -> int:
 
     manifest = build_all(cfg, langs)
     out = Path(args.out)
-    if out.exists() and args.langs:
+    if out.exists() and sorted(langs) != sorted(scope):
         raise SystemExit(
-            f"FATAL: refusing to overwrite {out} with a partial build "
-            f"({len(langs)} of {len(known)} languages). Rebuild all languages, "
-            f"or write elsewhere with --out."
+            f"FATAL: refusing to overwrite {_rel(out)} with a build of "
+            f"{sorted(langs)}, which is not the final scope {sorted(scope)}. "
+            f"A manifest covering some other set of languages is not the P1 "
+            f"corpus. Write elsewhere with --out."
         )
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")
 
-    print(f"\nwrote {out.relative_to(REPO_ROOT)}")
+    print(f"\nwrote {_rel(out)}")
     print(f"  languages : {len(manifest['languages'])}")
     print(f"  sha256    : {manifest['sha256']}")
     total_train = sum(v["n_train_items"] for v in manifest["languages"].values())

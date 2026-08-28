@@ -159,31 +159,86 @@ finetune:
   # from the 0.25 chance floor where a quantization contrast stops being
   # measurable.
   n_options: 4
-  distractors:
-    # Distractors come from OTHER articles, so they cannot be a second
-    # defensible answer to the same context.
-    exclude_same_article: true
 
-    # ...but "other article" alone is not enough. Drawing uniformly from the
-    # whole language produced items like
-    #     Q: Why were the Ohio National Guard troops activated in May 1864?
-    #     A. protect railroads and supply points   <- gold
-    #     B. R. Bridgman of Lichfield
-    #     C. University of Alabama Press
-    #     D. Indian Institute of Science
-    # where the correct option is identifiable from semantic type without
-    # reading the passage. Training on that teaches a shortcut, not reading
-    # comprehension in the target language.
+  # ---- final scope ---------------------------------------------------------
+  # Frozen 2026-08-29. The P1 grid is reduced to English + Bangla, on time and
+  # GPU grounds. The other three stay in benchmark.languages because P0 ran all
+  # five and those results stand unchanged; P0 reads
+  # configs/item_id_manifest.json and never touches the P1 split manifest, so
+  # narrowing the P1 corpus cannot reach it.
+  #
+  # The reduction is independently corroborated by construction. Under
+  # algorithm_version 2 an item needs three same-article answers close enough to
+  # the gold to share one window, and Sinhala cannot supply them: 23.5% of its
+  # rows are unbuildable at max_seq_tokens=2048, against 0.7% (English) and 6.9%
+  # (Bangla). A 23.5% drop rate makes the surviving Sinhala items a
+  # differently-selected sample, which is a confound rather than a cost.
+  # Assamese and Nepali were not measured -- they were already out of scope, and
+  # section 7's window-availability figures put them between Bangla and Sinhala.
+  final_scope_languages: [eng_Latn, ben_Beng]
+
+  # English yields more constructible items than Bangla (see
+  # `distractors.source` below), so the two training partitions are trimmed to
+  # a common size before training. Without this, "English gained more from
+  # fine-tuning" would be confounded with "English took more gradient steps".
+  # The trim is a deterministic subsample seeded from split_seed, and the cap
+  # is min(n_train_items) over final_scope_languages only, so it does not move
+  # when a provenance language is rebuilt alongside them.
+  equalise_train_partition: true
+
+  # ---- MCQ construction ----------------------------------------------------
+  # multi-wiki-qa ships extractive answer spans. P1 turns each into a 4-option
+  # item rendered through P0's frozen prompt_template, and the training loss
+  # covers the answer-letter token only. Training therefore teaches exactly the
+  # behaviour letter_logit scores, which is what keeps fine-tuned accuracy away
+  # from the 0.25 chance floor where a quantization contrast stops being
+  # measurable.
+  distractors:
+    # CHANGED 2026-08-29, algorithm_version 2. This was `exclude_same_article:
+    # true` with distractors drawn from topically NEAREST OTHER articles.
     #
-    # Distractors are therefore drawn from the topically NEAREST other articles
-    # (cosine over tf-idf profiles of the article contexts), so an option is
-    # wrong on the facts rather than wrong on the category.
+    # That construction was INVALID and its results are excluded from the
+    # paper. The gold answer was guaranteed present in the passage -- the
+    # answer-centred window is built around it and asserts it survived -- while
+    # a distractor from another article was present only by coincidence. The
+    # item was therefore solvable by "which option appears verbatim in the
+    # passage?", with no reading required: measured shortcut success ~96%
+    # (English) and ~92% (Bangla), on a gold-in-passage rate of 100% in both.
+    # The gap between those two numbers is itself language-dependent, so the
+    # artefact sat directly on the quantity P1 exists to measure.
+    #
+    # Distractors now come from the item's OWN article -- they are the answers
+    # to OTHER questions about the same passage -- and the window is chosen to
+    # contain all four option strings. All four options are then verbatim
+    # substrings of the passage, so the substring heuristic scores exactly 0.25
+    # in every language and carries no signal at all.
+    #
+    # Same-article answers were originally excluded on the grounds that a fact
+    # stated in the same context might be a second defensible answer. They are
+    # answers to DIFFERENT questions, and `assert_items_wellformed` still
+    # rejects any item where two options normalise equal or where more than one
+    # equals the gold. The residual risk is accepted deliberately: it is far
+    # smaller than a 100%-vs-0% presence asymmetry, and unlike that asymmetry it
+    # is not language-correlated.
+    source: same_article
+
+    # Superseded by `source`, kept so the change is legible in the manifest
+    # rather than only in this comment.
+    exclude_same_article: false
+
+    # v1 drew distractors from the 25 topically nearest OTHER articles so an
+    # option was wrong on the facts rather than wrong on the category. Under
+    # `source: same_article` that control is subsumed and strengthened: every
+    # option is now a fact from the very same passage. Retained as a record of
+    # what v1 did; it is not read by v2 selection.
     neighbour_articles: 25
 
-    # Surface shape (numeric-or-not, word-count bucket) is a tie-breaker WITHIN
-    # that topical set, never the primary filter. Applied on its own it made
-    # items worse, not better: a gold containing a digit pulled three dates and
-    # became the only non-date option.
+    # Surface shape (digit class, word-count bucket) is a TIE-BREAK ONLY, and
+    # only between candidates whose covering windows cost the same number of
+    # tokens. It is never allowed to widen the window, because widening it is
+    # exactly what makes construction language-dependent. The resulting
+    # option_surface_homogeneity is recorded per language and audited rather
+    # than assumed.
     match_surface_type: true
     length_buckets: [1, 3, 7]   # word-count upper bounds; last bucket is 8+
 
@@ -193,37 +248,45 @@ finetune:
   heldout_eval_cap: 900
 
   # ---- context window ------------------------------------------------------
-  # FROZEN 2026-08-28, before the resulting statistics were measured.
+  # CHANGED 2026-08-29, algorithm_version 2. Was `answer_centred_tokens`.
   #
-  # multi-wiki-qa contexts are whole Wikipedia articles, not passages. Measured
-  # against the real tokenizer, median P1 prompts run 830 tokens (English) to
-  # 3,132 (Assamese) -- so relying on left-truncation to fit max_seq_tokens
-  # destroyed the evidence for 61% of items overall, and the loss was severely
-  # LANGUAGE-CORRELATED: 20% for English against 78% for Assamese. Training on
-  # that teaches guessing, worst for exactly the low-resource languages whose
-  # behaviour delta(L,Q) is meant to characterise.
+  # v1 centred the window on the gold answer span and asserted the span
+  # survived. That is what guaranteed gold-in-passage = 100% and handed the
+  # task its lexical shortcut (see `distractors.source`). The window policy,
+  # not the distractor policy, was the proximate cause.
   #
-  # The window is centred on the answer span, which multi-wiki-qa locates with
-  # `answer_start` -- verified exact on 3,000/3,000 rows across all five
-  # languages.
+  # v2 places the window over the SPAN THAT COVERS ALL FOUR OPTIONS -- the gold
+  # plus the three same-article distractors -- and then expands outward to the
+  # token budget exactly as v1 did. Every option is a verbatim substring of the
+  # passage, so presence carries no information about which one is correct.
   #
-  # The budget is in TOKENS and is THE SAME NUMBER FOR EVERY LANGUAGE. A fixed
-  # CHARACTER window was rejected: at 1,500 characters English yields 348
-  # median tokens against Sinhala's 2,110, so it would hand English roughly
-  # four times the evidence for the same compute. Equalising the token budget
-  # equalises the evidence budget the model actually gets to read.
+  # The original v1 reason for windowing at all still holds and is unchanged:
+  # multi-wiki-qa contexts are whole Wikipedia articles, median 712 tokens
+  # (English) to 2,558 (Bangla) against the pinned tokenizer, so relying on
+  # left-truncation destroyed the evidence for most items and did so at
+  # severely language-correlated rates. The budget is in TOKENS and is THE SAME
+  # NUMBER FOR EVERY LANGUAGE, for the same reason as before: a fixed CHARACTER
+  # window hands English roughly four times the evidence for the same compute.
   context_window:
-    policy: answer_centred_tokens
-    algorithm_version: 1
+    policy: span_covering_tokens
+    algorithm_version: 2
 
-    # Reserved for the passage. The rest of max_seq_tokens covers the question,
-    # the four options, the template scaffolding and the answer label. The
-    # effective budget is computed per item from its own measured overhead --
-    # never assumed -- and the final prompt length is verified, not predicted.
+    # Reserved for the passage, unchanged from v1. The effective budget is
+    # computed per item from its own measured overhead -- never assumed -- and
+    # the final prompt length is verified, not predicted.
     context_budget_tokens: 800
 
+    # A covering span wider than context_budget_tokens may overflow it, up to
+    # the per-item ceiling (max_seq_tokens - 1 - overhead). Only the tail of the
+    # distribution overflows, so this costs almost nothing: measured across the
+    # full corpus, total training tokens move 1.00x (English) and 1.02x (Bangla)
+    # against v1 at the same budget. An item whose covering span will not fit
+    # even then is DROPPED and counted -- never clipped, because clipping it
+    # would silently restore the very presence asymmetry v2 exists to remove.
+    allow_overflow_to_cover_options: true
+
     # Windows are moved outward to whitespace so the passage does not begin or
-    # end mid-word. The trim may never cut into the answer span itself.
+    # end mid-word. The trim may never cut into any of the four option spans.
     trim_to_whitespace: true
 
   # ---- training ------------------------------------------------------------
@@ -254,8 +317,25 @@ finetune:
     gradient_checkpointing: true
     optim: adamw_torch
     max_grad_norm: 1.0
-    # Tighter than scoring.max_input_tokens (4096) because a 3B FP16 base plus
-    # a 151,936-wide logit tensor has to fit one T4. Truncation side is taken
+    # RAISED 2026-08-29 from 1024, before any v2 result was produced. Still
+    # tighter than scoring.max_input_tokens (4096). Truncation side is taken
     # from scoring.truncation_side (left), so the question and the four options
     # are never cut off -- the same guarantee P0 evaluation relies on.
-    max_seq_tokens: 1024
+    #
+    # 1024 was chosen for v1, where the window never needed to reach past the
+    # gold span. Under v2 the window must cover four option spans, and 1024
+    # makes that LANGUAGE-DEPENDENT: measured across the full corpus, 97.9% of
+    # English rows are constructible against 74.8% of Bangla, a 23.1pp gap of
+    # exactly the kind this design refuses to ship. Measured feasibility by
+    # ceiling, English / Bangla:
+    #     1024 -> 97.9% / 74.8%   (23.1pp)
+    #     2048 -> 99.3% / 93.5%   ( 5.8pp)
+    #     2560 -> 99.5% / 95.5%   ( 4.0pp)
+    #     4096 -> 99.8% / 98.1%   ( 1.7pp)
+    # 2048 is taken because the cost is ~nil (1.00x English, 1.02x Bangla total
+    # training tokens: batch size is 1 and nothing is padded, so only the
+    # overflowing tail gets longer) and because it is the smallest ceiling at
+    # which Bangla still yields more than heldout_eval_cap held-out items --
+    # at 1024 Bangla yields 722, below the 900 cap, and held-out parity with
+    # BELEBELE breaks outright.
+    max_seq_tokens: 2048

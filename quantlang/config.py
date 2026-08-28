@@ -20,6 +20,14 @@ CONFIG_PATH = REPO_ROOT / "configs" / "experiment.yaml"
 VALID_PRECISIONS = ("fp16", "int8_llmint8", "nf4")
 VALID_SCORING_METHODS = ("letter_logit", "option_loglik")
 
+# `other_article` + `answer_centred_tokens` is algorithm_version 1. Both names
+# stay listed so a v1 manifest still parses, never because the pair is usable:
+# together they guarantee the gold answer is the ONLY option present in the
+# passage, which makes the item solvable by substring presence alone. See
+# configs/experiment.yaml under finetune.distractors for the measurements.
+VALID_DISTRACTOR_SOURCES = ("same_article", "other_article")
+VALID_WINDOW_POLICIES = ("span_covering_tokens", "answer_centred_tokens")
+
 
 class ConfigError(RuntimeError):
     """Raised when configuration is missing, unpinned, or self-inconsistent."""
@@ -193,6 +201,54 @@ def _validate_finetune(cfg: dict[str, Any]) -> None:
             "finetune.split_seed must be an integer. It is frozen once and "
             "shared by both training seeds, so the sensitivity probe varies the "
             "training run and never the data."
+        )
+
+    scope = ft.get("final_scope_languages") or []
+    if not scope:
+        raise ConfigError(
+            "finetune.final_scope_languages is required. It names the languages "
+            "that actually get a P1 fine-tuning cell; the rest stay in "
+            "benchmark.languages as P0 provenance. Leaving the reduction "
+            "implicit is how a scope change becomes invisible."
+        )
+    outside = [l for l in scope if l not in bench_langs]
+    if outside:
+        raise ConfigError(
+            f"finetune.final_scope_languages contains {outside}, which are not "
+            f"in benchmark.languages {bench_langs}."
+        )
+
+    dcfg = ft.get("distractors") or {}
+    source = dcfg.get("source")
+    if source not in VALID_DISTRACTOR_SOURCES:
+        raise ConfigError(
+            f"finetune.distractors.source={source!r} invalid. Allowed: "
+            f"{list(VALID_DISTRACTOR_SOURCES)}. 'other_article' is "
+            f"algorithm_version 1 and is retained only so a historical manifest "
+            f"still parses; items built with it are solvable by substring "
+            f"presence alone and are not admissible P1 results."
+        )
+    if source == "same_article" and dcfg.get("exclude_same_article"):
+        raise ConfigError(
+            "finetune.distractors.source is 'same_article' but "
+            "exclude_same_article is true. Those contradict, and the item would "
+            "have no candidate pool at all."
+        )
+
+    policy = (ft.get("context_window") or {}).get("policy")
+    if policy not in VALID_WINDOW_POLICIES:
+        raise ConfigError(
+            f"finetune.context_window.policy={policy!r} invalid. Allowed: "
+            f"{list(VALID_WINDOW_POLICIES)}."
+        )
+    if (source == "same_article") != (policy == "span_covering_tokens"):
+        raise ConfigError(
+            f"distractors.source={source!r} and context_window.policy="
+            f"{policy!r} are not a matching pair. Same-article distractors only "
+            f"remove the substring shortcut if the window is chosen to contain "
+            f"ALL FOUR options, and a span-covering window has nothing to cover "
+            f"unless the distractors come from the same passage. Mixing them "
+            f"yields an item set that looks repaired and is not."
         )
 
     max_seq = (ft.get("training") or {}).get("max_seq_tokens")

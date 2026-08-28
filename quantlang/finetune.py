@@ -366,6 +366,81 @@ def train_lora(cfg: dict[str, Any], peft_model, examples: list[dict], *,
 # merge
 # --------------------------------------------------------------------------- #
 
+def _target_weight_snapshot(peft_model) -> dict[str, Any]:
+    """CPU copies of the base weights inside every LoRA-wrapped module.
+
+    Keyed by the module's name with PEFT's wrapper segments stripped, so the
+    keys line up with the plain checkpoint that `merge_and_unload` returns.
+    """
+    from peft.tuners.lora import LoraLayer
+
+    out: dict[str, Any] = {}
+    for name, module in peft_model.named_modules():
+        if isinstance(module, LoraLayer) and hasattr(module, "base_layer"):
+            key = (name.replace("base_model.model.", "")
+                       .replace(".base_layer", ""))
+            out[key] = module.base_layer.weight.detach().to("cpu",
+                                                            torch.float32).clone()
+    return out
+
+
+# A merged adapter must move the weights it was trained on. The threshold is
+# only there to separate "moved" from "bit-identical": any real LoRA update
+# clears it by orders of magnitude, and an adapter whose B matrices are still at
+# their zero initialisation produces exactly 0.0.
+MIN_MERGE_DELTA = 1e-6
+
+
+def assert_merge_moved(merged, before: dict[str, Any]) -> dict[str, Any]:
+    """Prove `merge_and_unload` actually folded the adapter into the weights.
+
+    This gate exists because of a run that did not have it. A full English P1
+    fine-tune, merge and three-precision evaluation completed, and the resulting
+    "fine-tuned" logits were bit-identical to the base model's on all 900
+    BELEBELE items at all three precisions -- maximum difference 0.000000. That
+    number cannot come from a merged adapter: merging a trained LoRA perturbs
+    FP16 weights, and even an adapter that learned to reproduce the base model
+    would differ in the low bits. It is the signature of the base weights being
+    scored instead.
+
+    Nothing in the pipeline noticed, because nothing measured it. Structural
+    checks did not help: `assert_adapter_applied` proves LoRA layers EXIST, and
+    the dtype check proves the checkpoint is FP16. Neither asks whether the
+    numbers changed.
+    """
+    after = dict(merged.named_parameters())
+    checked = 0
+    max_delta = 0.0
+    worst = None
+    for key, prior in before.items():
+        param = after.get(f"{key}.weight")
+        if param is None:
+            continue
+        d = float((param.detach().to("cpu", torch.float32) - prior)
+                  .abs().max().item())
+        checked += 1
+        if d > max_delta:
+            max_delta, worst = d, key
+
+    if checked == 0:
+        raise FineTuneError(
+            "no LoRA-targeted module could be matched between the wrapped model "
+            "and the merged checkpoint, so the merge cannot be verified. "
+            "Refusing to ship a checkpoint that might be the base model."
+        )
+    if max_delta < MIN_MERGE_DELTA:
+        raise FineTuneError(
+            f"merging the adapter changed nothing: the largest weight movement "
+            f"across {checked} LoRA-targeted modules is {max_delta:.3e}, below "
+            f"{MIN_MERGE_DELTA:.0e}. The 'fine-tuned' checkpoint IS the base "
+            f"model, and every FT cell built from it would silently reproduce "
+            f"the Base arm. Check that gradients reached the LoRA B matrices."
+        )
+    return {"n_modules_checked": checked,
+            "max_abs_weight_delta": max_delta,
+            "largest_movement_in": worst}
+
+
 def merge_and_save(peft_model, tok, out_dir: Path) -> dict[str, Any]:
     """Merge the adapter into FP16 base weights and write one checkpoint.
 
@@ -377,8 +452,13 @@ def merge_and_save(peft_model, tok, out_dir: Path) -> dict[str, Any]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Snapshot the pre-merge weights of the modules LoRA actually targets, so
+    # the merge can be PROVEN to have changed something. See assert_merge_moved.
+    before = _target_weight_snapshot(peft_model)
+
     merged = peft_model.merge_and_unload()
     merged = merged.half()
+    delta = assert_merge_moved(merged, before)
     merged.save_pretrained(out_dir, safe_serialization=True)
     tok.save_pretrained(out_dir)
 
@@ -391,7 +471,8 @@ def merge_and_save(peft_model, tok, out_dir: Path) -> dict[str, Any]:
         )
 
     digest = directory_digest(out_dir)
-    return {"path": str(out_dir), "parameter_dtypes": sorted(dtypes), **digest}
+    return {"path": str(out_dir), "parameter_dtypes": sorted(dtypes),
+            "weight_delta": delta, **digest}
 
 
 # --------------------------------------------------------------------------- #
@@ -469,6 +550,15 @@ def finetune_language(
         "seed": seed,
         "n_train_items_available": manifest["languages"][lang]["n_train_items"],
         "n_train_items_used": len(items),
+        # The common size across finetune.final_scope_languages. Both FT arms
+        # take the same number of gradient steps, so a difference between them
+        # cannot be a difference in how much data each one saw.
+        "train_equalise_cap": p1data.train_equalise_cap(cfg, manifest),
+        "n_train_items_equalised": manifest["languages"][lang].get(
+            "n_train_items_equalised"),
+        "split_algorithm_version": manifest["context_window"][
+            "algorithm_version"],
+        "distractor_source": manifest["distractors"]["source"],
         "limit": limit,
         "train_dataset": ft["train_dataset"],
         "train_dataset_revision": ft["hf_revision"],

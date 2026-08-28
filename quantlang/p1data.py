@@ -7,7 +7,7 @@ revision and the frozen `finetune.split_seed`, every article assignment, every
 distractor, and every gold-answer position is reproducible from scratch, and
 `configs/p1_split_manifest.json` records digests that make any drift detectable.
 
-Three things are enforced here rather than trusted.
+Four things are enforced here rather than trusted.
 
 1. THE SPLIT IS GROUPED BY ARTICLE, NEVER BY ROW.
    multi-wiki-qa carries several questions per Wikipedia article over one shared
@@ -18,13 +18,39 @@ Three things are enforced here rather than trusted.
    no distinct context spans two groups, which is the invariant that actually
    matters -- grouping by a label is only as good as the label.
 
-2. DISTRACTORS COME FROM OTHER ARTICLES, AND ONLY FROM THE SAME PARTITION.
-   Same-article answers are excluded because a fact stated in the same context
-   can be a second defensible answer, and an ambiguous item teaches noise.
-   Cross-partition answers are excluded because a held-out item built from
-   strings the model was trained on is no longer clean held-out data.
+2. EVERY OPTION IS A VERBATIM SUBSTRING OF THE PASSAGE.  (algorithm_version 2)
+   This is the invariant the whole construction now turns on, and it exists
+   because version 1 violated it in the worst possible way.
 
-3. ITEMS ARE RENDERED THROUGH P0'S FROZEN PROMPT TEMPLATE.
+   v1 centred the passage window on the gold answer span and drew distractors
+   from OTHER articles. The gold was therefore in the passage with probability
+   1.0 and a distractor only by coincidence, so the item was solvable by
+   "which option appears verbatim in the passage?" -- measured shortcut success
+   ~96% (English) and ~92% (Bangla) against a 100% gold-in-passage rate in both.
+   The 4pp gap between those two numbers is itself language-dependent, which put
+   the artefact directly on top of the quantity P1 exists to measure. Every v1
+   item set and every result derived from one is excluded from the paper.
+
+   v2 draws the three distractors from the item's OWN article -- they are the
+   answers to OTHER questions about the same passage -- and then places the
+   window over the span that COVERS ALL FOUR option strings. Presence is now
+   constant across options, so the substring heuristic scores exactly 0.25 in
+   every language and carries no signal at all. `assert_items_wellformed`
+   checks this per item rather than trusting the construction to have held.
+
+   The cost is a residual ambiguity risk that v1 avoided by construction: a
+   fact from the same passage could in principle be a second defensible answer.
+   It is accepted deliberately. The options answer DIFFERENT questions, the
+   wellformedness check still rejects any item where two options normalise
+   equal, and unlike a 100%-vs-0% presence asymmetry this risk is not
+   language-correlated.
+
+3. DISTRACTORS NEVER CROSS THE PARTITION BOUNDARY.
+   Same-article implies same-partition -- the split is grouped by article -- so
+   this now holds by construction rather than by filtering. A held-out item
+   built from strings the model was trained on would not be clean held-out data.
+
+4. ITEMS ARE RENDERED THROUGH P0'S FROZEN PROMPT TEMPLATE.
    `build_prompt` is imported from `quantlang.data` and used unchanged, so a P1
    item and a P0 item are the same object as far as the scorer is concerned.
    The training loss covers the answer-letter token only, which is exactly what
@@ -59,6 +85,24 @@ REQUIRED_FIELDS = ("context", "question", "answer")
 # If more than this fraction of a language's rows are unusable, the corpus is
 # not what we think it is and the build stops rather than quietly shrinking.
 MAX_EMPTY_ROW_FRACTION = 0.02
+
+# The separate ceiling on rows that load fine but cannot be BUILT into an item
+# whose passage contains all four options. This is a property of the
+# construction, not of the corpus, so it gets its own number rather than
+# stretching the source-quality one.
+#
+# 8% is set from measurement, not taste. Across the full corpus at
+# max_seq_tokens=2048 the construction drop rate is 0.7% (English) and 6.5%
+# (Bangla); at 1024 Bangla was 25.2%, which is what forced the ceiling up. The
+# threshold sits above the measured Bangla rate and far below the rate any
+# further regression would produce.
+#
+# The ABSOLUTE rate is only half the concern. A rate that is merely high is a
+# cost; a rate that DIFFERS between languages is a confound, because the
+# surviving items are then a differently-selected sample per language. That
+# comparison needs every language at once, so it lives in
+# scripts/build_p1_splits.py rather than here.
+MAX_CONSTRUCTION_DROP_FRACTION = 0.08
 
 
 class P1DataError(RuntimeError):
@@ -299,10 +343,6 @@ def _digit_class(text: str) -> str:
     return "numeric" if ratio > DIGIT_DOMINANT_RATIO else "mixed"
 
 
-def _has_digit(text: str) -> bool:
-    return any(ch.isdigit() for ch in text)
-
-
 def _length_bucket(text: str, bounds: list[int]) -> int:
     n = len(text.split())
     for i, upper in enumerate(bounds):
@@ -314,86 +354,19 @@ def _length_bucket(text: str, bounds: list[int]) -> int:
 def _surface_key(text: str, bounds: list[int]) -> tuple[str, int]:
     """Coarse shape of an answer: numeric-or-not, plus a word-count bucket.
 
-    Surface matching alone is far too weak to build a usable item -- it is a
-    tie-breaker applied *within* a topically related candidate set, never the
-    primary filter. See `_neighbours` for why.
+    Surface matching alone is far too weak to build a usable item. Under v2 it
+    is a PREFERENCE applied within the item's own article, and only where
+    honouring it costs no extra context tokens -- see `build_mcq_items`.
     """
     return (_digit_class(text), _length_bucket(text, bounds))
 
 
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
-
-# Terms kept per article profile, highest tf-idf first. Pruning to the most
-# distinctive terms is what keeps the all-pairs similarity cheap; the tail of
-# common words contributes noise and cost in equal measure.
-_PROFILE_TERMS = 120
-
-
-def _tokenise(text: str) -> list[str]:
-    """Whitespace/word tokens, case-folded. Works for all five scripts, which
-    all use spaces; no language-specific analysis is involved."""
-    return [t for t in _TOKEN_RE.findall(text.casefold()) if len(t) > 1]
-
-
-def _article_profiles(members: list[dict]) -> dict[str, dict[str, float]]:
-    """tf-idf profile per article, L2-normalised, pruned to _PROFILE_TERMS."""
-    texts: dict[str, set[str]] = {}
-    for r in members:
-        texts.setdefault(r["group_id"], set()).add(r["context"])
-
-    docs = {g: _tokenise(" ".join(sorted(s))) for g, s in texts.items()}
-    n_docs = len(docs)
-    df: dict[str, int] = {}
-    for toks in docs.values():
-        for t in set(toks):
-            df[t] = df.get(t, 0) + 1
-
-    profiles: dict[str, dict[str, float]] = {}
-    for g in sorted(docs):
-        tf: dict[str, int] = {}
-        for t in docs[g]:
-            tf[t] = tf.get(t, 0) + 1
-        vec = {t: (1.0 + math.log(c)) * math.log(n_docs / df[t])
-               for t, c in tf.items() if df[t] < n_docs}
-        top = sorted(vec.items(), key=lambda kv: (-kv[1], kv[0]))[:_PROFILE_TERMS]
-        norm = math.sqrt(sum(w * w for _, w in top)) or 1.0
-        profiles[g] = {t: w / norm for t, w in top}
-    return profiles
-
-
-def _neighbours(profiles: dict[str, dict[str, float]], k: int) -> dict[str, list[str]]:
-    """For each article, the k most topically similar OTHER articles.
-
-    This is the fix for the failure mode that surface matching alone produces.
-    Drawing distractors uniformly from the whole language gives options like
-    "University of Alabama Press" against a question about troop movements: the
-    correct answer is identifiable from semantic type without reading the
-    passage at all, so training on such items teaches a shortcut rather than
-    reading comprehension in the target language. Distractors taken from
-    topically adjacent articles are wrong on the facts rather than wrong on the
-    category, which is what makes the item require the passage.
-
-    Cosine over the pruned tf-idf profiles, via an inverted index. Ties break on
-    article id so the ordering is total and reproducible.
-    """
-    groups = sorted(profiles)
-    inverted: dict[str, list[tuple[str, float]]] = {}
-    for g in groups:
-        for term, weight in profiles[g].items():
-            inverted.setdefault(term, []).append((g, weight))
-
-    out: dict[str, list[str]] = {}
-    for g in groups:
-        scores: dict[str, float] = {}
-        for term, weight in profiles[g].items():
-            for other, other_weight in inverted.get(term, ()):
-                if other == g:
-                    continue
-                scores[other] = scores.get(other, 0.0) + weight * other_weight
-        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
-        out[g] = [other for other, _ in ranked]
-    return out
-
+# v1 drew distractors from the 25 topically NEAREST OTHER articles, ranked by
+# cosine over tf-idf article profiles, so an option was wrong on the facts
+# rather than wrong on the category. That machinery is GONE with v1: under
+# `source: same_article` every option is a fact from the very same passage,
+# which is a stronger topical control than any similarity ranking, and it
+# costs no all-pairs similarity pass over the corpus.
 
 # --------------------------------------------------------------------------- #
 # answer-centred context window
@@ -406,6 +379,12 @@ _TOKENIZER_CACHE: dict[tuple[str, str], Any] = {}
 # prompt. Each pass gives back the overshoot plus a small margin.
 _FIT_MARGIN_TOKENS = 8
 _MAX_FIT_ITERATIONS = 8
+
+# Occurrences of one candidate answer searched for inside one article. An answer
+# string can repeat, and the nearest occurrence to the gold is often what keeps
+# the covering window small. Bounded so a single very common string cannot make
+# selection quadratic in the article length.
+_MAX_OCCURRENCES = 8
 
 
 def tokenizer_identity(cfg: dict[str, Any]) -> dict[str, str]:
@@ -471,21 +450,128 @@ def _trim_to_whitespace(context: str, lo: int, hi: int,
     return lo, hi
 
 
-def answer_centred_window(cfg: dict[str, Any], tok, context: str,
-                          answer: str, answer_start: int,
-                          budget_tokens: int) -> str:
-    """A `budget_tokens`-long window of `context` centred on the answer span.
+def _occurrences(hay: str, needle: str, limit: int = _MAX_OCCURRENCES
+                 ) -> list[tuple[int, int]]:
+    """Every place `needle` appears in `hay`, left to right, capped.
 
-    The budget is a token count and is the SAME NUMBER FOR EVERY LANGUAGE. A
+    An answer string can occur several times in an article, and taking the
+    occurrence NEAREST the gold is often the difference between a 200-token
+    window and a 2,000-token one. The cap keeps a pathological string (a single
+    common word) from dominating the search; it is a compute bound, not a
+    modelling choice, and the search below is monotone in it.
+    """
+    out: list[tuple[int, int]] = []
+    i = 0
+    while len(out) < limit:
+        j = hay.find(needle, i)
+        if j < 0:
+            break
+        out.append((j, j + len(needle)))
+        i = j + 1
+    return out
+
+
+def _reach(candidates: list[dict], gold_lo: int, gold_hi: int,
+           side: str, k: int) -> tuple[int | None, list[dict]]:
+    """How far out on one side we must go to pick up `k` distinct candidates.
+
+    Returns the character distance and the candidates chosen. Ordering is by
+    (distance, surface mismatch, text), which is total, so the choice is fully
+    determined by the data and never by dict or dataset ordering.
+
+    Surface shape enters ONLY here, as a tie-break between candidates that cost
+    the same number of characters to reach. It is never allowed to widen the
+    window: widening it is precisely what makes construction rates diverge
+    between English and Bangla, which is the failure this version exists to
+    avoid.
+    """
+    if k == 0:
+        return 0, []
+    ranked: list[tuple[int, int, str, dict]] = []
+    for cand in candidates:
+        best = None
+        for lo, hi in cand["spans"]:
+            if side == "left" and hi <= gold_lo:
+                d = gold_lo - lo
+            elif side == "right" and lo >= gold_hi:
+                d = hi - gold_hi
+            else:
+                continue
+            if best is None or d < best[0]:
+                best = (d, (lo, hi))
+        if best is not None:
+            ranked.append((best[0], cand["surface_penalty"], cand["text"],
+                           {**cand, "span": best[1]}))
+    if len(ranked) < k:
+        return None, []
+    ranked.sort(key=lambda r: (r[0], r[1], r[2]))
+    picked = [r[3] for r in ranked[:k]]
+    return max(r[0] for r in ranked[:k]), picked
+
+
+def choose_covering_distractors(candidates: list[dict], gold_lo: int,
+                                gold_hi: int, k: int
+                                ) -> tuple[list[dict], tuple[int, int]] | None:
+    """Pick `k` distractors whose spans, with the gold's, span the least text.
+
+    The window has to contain all four option strings, so the cost of a
+    distractor is how much further the window must reach to include it. This
+    tries every split of `k` between the two sides of the gold span and keeps
+    the cheapest; with k=3 that is four candidate placements, each resolved
+    deterministically by `_reach`.
+
+    Returns (chosen, (lo, hi)) or None if fewer than `k` distinct candidates can
+    be located in the context at all.
+    """
+    best: tuple[list[dict], tuple[int, int]] | None = None
+    best_width = None
+    for left_k in range(k + 1):
+        left, left_picked = _reach(candidates, gold_lo, gold_hi, "left", left_k)
+        if left is None:
+            continue
+        # A candidate that occurs on BOTH sides of the gold would otherwise be
+        # selected twice and produce two identical options, so whatever the left
+        # pass took is withheld from the right pass.
+        taken = {normalise_answer(c["text"]) for c in left_picked}
+        remaining = [c for c in candidates
+                     if normalise_answer(c["text"]) not in taken]
+        right, right_picked = _reach(remaining, gold_lo, gold_hi, "right",
+                                     k - left_k)
+        if right is None:
+            continue
+        lo, hi = gold_lo - left, gold_hi + right
+        width = hi - lo
+        if best_width is None or width < best_width:
+            best_width = width
+            best = (left_picked + right_picked, (lo, hi))
+    return best
+
+
+def span_covering_window(cfg: dict[str, Any], tok, context: str,
+                         required: list[tuple[int, int]],
+                         budget_tokens: int) -> str:
+    """A `budget_tokens` window of `context` containing every span in `required`.
+
+    `required` is the gold answer span plus the three distractor spans. The
+    window is placed over the interval that covers them and then expanded
+    outward, so the passage reads as continuous prose rather than as four
+    stitched fragments, and so the four option spans do not sit at the window
+    edges where their position would itself be a cue.
+
+    The budget is a token count and is THE SAME NUMBER FOR EVERY LANGUAGE. A
     character window would hand English roughly four times the evidence of
-    Sinhala for the same compute; equalising tokens equalises what the model
+    Bangla for the same compute; equalising tokens equalises what the model
     actually gets to read.
 
-    Raises if the answer span alone exceeds the budget -- an item whose answer
-    cannot fit is reported, never silently clipped.
+    Raises if the covering interval alone exceeds the budget -- such an item is
+    reported and dropped by the caller, never clipped. Clipping it would drop an
+    option out of the passage and silently restore the presence asymmetry this
+    construction exists to remove.
     """
     if budget_tokens <= 0:
         raise P1DataError(f"context budget must be positive, got {budget_tokens}")
+    if not required:
+        raise P1DataError("span_covering_window needs at least one required span")
 
     enc = tok(context, add_special_tokens=False, return_offsets_mapping=True)
     offsets = list(enc["offset_mapping"])
@@ -493,24 +579,25 @@ def answer_centred_window(cfg: dict[str, Any], tok, context: str,
     if n <= budget_tokens:
         return context
 
-    a_lo, a_hi = answer_start, answer_start + len(answer)
-    tok_lo = next((i for i, (s, e) in enumerate(offsets) if e > a_lo), 0)
+    req_lo = min(lo for lo, _ in required)
+    req_hi = max(hi for _, hi in required)
+    tok_lo = next((i for i, (s, e) in enumerate(offsets) if e > req_lo), 0)
     tok_hi = next((i + 1 for i in range(n - 1, -1, -1)
-                   if offsets[i][0] < a_hi), tok_lo + 1)
+                   if offsets[i][0] < req_hi), tok_lo + 1)
     span = tok_hi - tok_lo
     if span > budget_tokens:
-        # Loud, per-item, and counted by the caller -- never a clipped answer.
         raise P1ItemTooLong(
-            f"answer span is {span} tokens against a {budget_tokens}-token "
-            f"context budget, so it cannot be shown in full: {answer[:80]!r}. "
-            f"Failing rather than truncating the answer itself."
+            f"the four option spans cover {span} tokens against a "
+            f"{budget_tokens}-token context budget, so they cannot all be shown. "
+            f"Failing rather than dropping an option out of the passage."
         )
 
     remaining = budget_tokens - span
     left = remaining // 2
     lo = tok_lo - left
     hi = tok_hi + (remaining - left)
-    # Redistribute rather than lose budget when the span sits near an edge.
+    # Redistribute rather than lose budget when the covered interval sits near
+    # an edge of the article.
     if lo < 0:
         hi = min(n, hi - lo)
         lo = 0
@@ -521,44 +608,75 @@ def answer_centred_window(cfg: dict[str, Any], tok, context: str,
     char_lo, char_hi = offsets[lo][0], offsets[hi - 1][1]
     if cfg_mod.require(cfg, "finetune.context_window.trim_to_whitespace"):
         char_lo, char_hi = _trim_to_whitespace(context, char_lo, char_hi,
-                                               a_lo, a_hi)
+                                               req_lo, req_hi)
     window = context[char_lo:char_hi].strip()
-    if answer not in window:
-        raise P1DataError(
-            f"the answer span fell outside its own window; this is a bug in "
-            f"window placement, not a data problem. answer={answer[:60]!r}"
-        )
+
+    shift = context.index(window, max(0, char_lo - 2)) if window else char_lo
+    for lo_c, hi_c in required:
+        if not (shift <= lo_c and hi_c <= shift + len(window)):
+            raise P1DataError(
+                f"a required option span fell outside its own window; this is a "
+                f"bug in window placement, not a data problem. "
+                f"span=({lo_c},{hi_c}) window=({shift},{shift + len(window)})"
+            )
     return window
 
 
+def covering_span_tokens(tok, context: str,
+                         required: list[tuple[int, int]]) -> int:
+    """Token length of the interval covering `required`. The item's hard floor."""
+    enc = tok(context, add_special_tokens=False, return_offsets_mapping=True)
+    offsets = list(enc["offset_mapping"])
+    req_lo = min(lo for lo, _ in required)
+    req_hi = max(hi for _, hi in required)
+    return sum(1 for s, e in offsets if e > req_lo and s < req_hi)
+
+
 def windowed_passage(cfg: dict[str, Any], tok, row: dict, options: list[str],
-                     gold: int) -> dict[str, Any]:
+                     gold: int, required: list[tuple[int, int]]) -> dict[str, Any]:
     """Window one item's passage and PROVE the assembled prompt fits.
 
     The effective budget is computed from this item's own measured overhead --
     its question, its four options, the template scaffolding and the answer
     label -- never assumed. The final prompt length is then measured, and the
     budget shrinks until it actually fits. Nothing here relies on truncation.
+
+    The one asymmetry against version 1: the budget may EXCEED
+    `context_budget_tokens` when the covering interval demands it, up to the
+    per-item ceiling. Only the tail of the distribution overflows, so this costs
+    ~nothing (measured: 1.00x English, 1.02x Bangla total training tokens), and
+    the alternative -- clipping -- would drop an option out of the passage.
     """
     wcfg = cfg_mod.require(cfg, "finetune.context_window")
     budget = int(wcfg["context_budget_tokens"])
+    overflow_ok = bool(wcfg["allow_overflow_to_cover_options"])
     max_seq = int(cfg_mod.require(cfg, "finetune.training.max_seq_tokens"))
     # One token is reserved for the answer label appended during training.
     ceiling = max_seq - 1
 
     probe = {**row, "passage": "", "options": options, "gold": gold}
     overhead = _n_tokens(tok, build_prompt(cfg, probe))
-    effective = min(budget, ceiling - overhead)
-    if effective <= 0:
+    headroom = ceiling - overhead
+    if headroom <= 0:
         raise P1ItemTooLong(
             f"{row['item_id']}: question and options alone take {overhead} "
             f"tokens, leaving no room for a passage inside {ceiling}. "
             f"Failing rather than shipping an item with no evidence."
         )
 
+    floor = covering_span_tokens(tok, row["context"], required)
+    effective = min(headroom, max(budget, floor) if overflow_ok else budget)
+    if floor > effective:
+        raise P1ItemTooLong(
+            f"{row['item_id']}: the four option spans cover {floor} tokens "
+            f"against an effective budget of {effective} "
+            f"(ceiling {ceiling} - overhead {overhead}). Dropping the item "
+            f"rather than showing only some of its options."
+        )
+
     for _ in range(_MAX_FIT_ITERATIONS):
-        passage = answer_centred_window(cfg, tok, row["context"], row["answer"],
-                                        row["answer_start"], effective)
+        passage = span_covering_window(cfg, tok, row["context"], required,
+                                       effective)
         prompt = build_prompt(cfg, {**row, "passage": passage,
                                     "options": options, "gold": gold})
         total = _n_tokens(tok, prompt)
@@ -569,27 +687,35 @@ def windowed_passage(cfg: dict[str, Any], tok, row: dict, options: list[str],
                 "context_tokens": _n_tokens(tok, passage),
                 "overhead_tokens": overhead,
                 "effective_budget": effective,
+                "covering_span_tokens": floor,
+                "overflowed_budget": effective > budget,
             }
         effective -= (total - ceiling) + _FIT_MARGIN_TOKENS
-        if effective <= 0:
+        if effective < floor:
             break
 
     raise P1ItemTooLong(
         f"{row['item_id']}: could not fit the prompt within {ceiling} tokens "
-        f"after {_MAX_FIT_ITERATIONS} attempts. Reporting rather than "
-        f"truncating."
+        f"without cutting into the option spans ({floor} tokens). Reporting "
+        f"rather than truncating."
     )
-
-
 def build_mcq_items(cfg: dict[str, Any], lang: str, rows: list[dict],
                     group_ids: list[str], partition: str,
                     tok=None) -> tuple[list[dict], list[dict]]:
     """Build 4-option items for one partition. Returns (items, dropped).
 
-    The answer pool is drawn from THIS partition only, and never from the item's
-    own article. Everything is seeded from (split_seed, lang, partition,
-    item_id), so an item is reproducible in isolation without rebuilding the
-    corpus around it.
+    Distractors are the answers to OTHER questions about the SAME article, and
+    the passage window is then chosen to contain all four option strings. That
+    pairing is the whole point: it makes "which option appears in the passage?"
+    a uniform 1-in-4 guess in every language, where version 1 made it a ~96%
+    (English) / ~92% (Bangla) solution.
+
+    Selection is deterministic by construction cost -- the three distractors are
+    the ones whose spans, with the gold's, span the least text -- with surface
+    shape as a tie-break at equal cost and article-order as the final tie-break.
+    The only stochastic decision left is WHERE the gold lands among the four
+    letters, seeded from (split_seed, lang, partition, item_id) so an item is
+    reproducible in isolation without rebuilding the corpus around it.
     """
     if partition not in PARTITIONS:
         raise P1DataError(f"unknown partition {partition!r}; allowed {PARTITIONS}")
@@ -599,103 +725,138 @@ def build_mcq_items(cfg: dict[str, Any], lang: str, rows: list[dict],
     n_options = int(cfg_mod.require(cfg, "finetune.n_options"))
     dcfg = cfg_mod.require(cfg, "finetune.distractors")
     bounds = list(dcfg["length_buckets"])
-    exclude_same_article = bool(dcfg["exclude_same_article"])
     match_surface = bool(dcfg["match_surface_type"])
-    n_neighbours = int(dcfg["neighbour_articles"])
+    source = dcfg["source"]
+    if source != "same_article":
+        raise P1DataError(
+            f"finetune.distractors.source is {source!r}. This builder "
+            f"implements 'same_article' only -- 'other_article' is "
+            f"algorithm_version 1, whose items are solvable by substring "
+            f"presence alone."
+        )
 
     keep = set(group_ids)
     members = [r for r in rows if r["group_id"] in keep]
     members.sort(key=lambda r: r["item_id"])
 
-    # Answer pool for this partition, in a fixed order so sampling is stable.
-    pool = [{"item_id": r["item_id"], "group_id": r["group_id"],
-             "text": r["answer"],
-             "surface": _surface_key(r["answer"], bounds)} for r in members]
+    # Rows are grouped by (article, context) rather than by article alone. An
+    # article with more than one distinct context must not lend an answer from
+    # one context to an item built on another -- the string would not be in the
+    # passage, which is exactly the asymmetry being removed.
+    by_context: dict[tuple[str, str], list[dict]] = {}
+    for r in members:
+        by_context.setdefault((r["group_id"], r["context"]), []).append(r)
 
-    by_surface: dict[tuple, list[dict]] = {}
-    by_digit: dict[str, list[dict]] = {}
-    by_group: dict[str, list[dict]] = {}
-    for entry in pool:
-        by_surface.setdefault(entry["surface"], []).append(entry)
-        by_digit.setdefault(entry["surface"][0], []).append(entry)
-        by_group.setdefault(entry["group_id"], []).append(entry)
-
-    neighbours = _neighbours(_article_profiles(members), n_neighbours)
-
+    n_needed = n_options - 1
     items: list[dict] = []
     dropped: list[dict] = []
     for r in members:
         gold_text = r["answer"]
         gold_norm = normalise_answer(gold_text)
-        rng = _rng(seed, lang, partition, r["item_id"])
-
-        def usable(entry: dict) -> bool:
-            if exclude_same_article and entry["group_id"] == r["group_id"]:
-                return False
-            return normalise_answer(entry["text"]) != gold_norm
-
-        # Candidates from topically adjacent articles first, so a distractor is
-        # wrong on the facts rather than wrong on the category. Surface matching
-        # is a tie-breaker inside that set, never the primary filter -- on its
-        # own it produced items whose gold was identifiable from semantic type
-        # without reading the passage.
-        near = [e for g in neighbours.get(r["group_id"], ())
-                for e in by_group.get(g, ())]
+        gold_lo = r["answer_start"]
+        gold_hi = gold_lo + len(gold_text)
         gold_surface = _surface_key(gold_text, bounds)
-        tiers = []
-        if match_surface:
-            tiers.append([e for e in near if e["surface"] == gold_surface])
-            tiers.append(near)
-            tiers.append(by_surface.get(gold_surface, []))
-            tiers.append(by_digit.get(_digit_class(gold_text), []))
-        else:
-            tiers.append(near)
-        tiers.append(pool)
+        context = r["context"]
 
-        chosen: list[dict] = []
-        chosen_norm = {gold_norm}
-        for tier in tiers:
-            candidates = [e for e in tier if usable(e)
-                          and normalise_answer(e["text"]) not in chosen_norm]
-            if not candidates:
+        candidates: list[dict] = []
+        for other in by_context[(r["group_id"], context)]:
+            if other["item_id"] == r["item_id"]:
                 continue
-            for idx in rng.permutation(len(candidates)):
-                entry = candidates[int(idx)]
-                norm = normalise_answer(entry["text"])
-                if norm in chosen_norm:
-                    continue
-                chosen.append(entry)
-                chosen_norm.add(norm)
-                if len(chosen) == n_options - 1:
-                    break
-            if len(chosen) == n_options - 1:
-                break
+            text = other["answer"]
+            if not text or normalise_answer(text) == gold_norm:
+                continue
+            if any(normalise_answer(c["text"]) == normalise_answer(text)
+                   for c in candidates):
+                continue
+            spans = _occurrences(context, text)
+            if not spans:
+                # The answer to another question about this article is not a
+                # substring of THIS row's context. It cannot be shown, so it
+                # cannot be an option.
+                continue
+            candidates.append({
+                "item_id": other["item_id"],
+                "group_id": other["group_id"],
+                "text": text,
+                "spans": spans,
+                "surface_penalty": (0 if _surface_key(text, bounds) == gold_surface
+                                    else 1) if match_surface else 0,
+            })
 
-        if len(chosen) != n_options - 1:
-            raise P1DataError(
-                f"{lang}/{partition}: item {r['item_id']!r} could not be given "
-                f"{n_options - 1} distinct distractors (found {len(chosen)}). "
-                f"The answer pool for this partition is too small or too "
-                f"repetitive. Stop and inspect it -- do not build a short item."
-            )
-
-        gold_index = int(rng.integers(0, n_options))
-        options = [e["text"] for e in chosen]
-        options.insert(gold_index, gold_text)
-        distractor_ids = [e["item_id"] for e in chosen]
-
-        # The window is placed AFTER the options are chosen, because the
-        # effective budget depends on how many tokens this item's own question
-        # and options consume. Distractor selection above is untouched by it.
-        gold = gold_index + 1
-        try:
-            win = windowed_passage(cfg, tok, r, options, gold)
-        except P1ItemTooLong as exc:
-            # Counted and reported, never silently truncated. Only this narrow
-            # exception is caught, so a genuine bug in window placement still
-            # stops the build.
-            dropped.append({"item_id": r["item_id"], "reason": str(exc)})
+        if len(candidates) < n_needed:
+            dropped.append({
+                "item_id": r["item_id"],
+                "reason": (f"only {len(candidates)} same-article answer(s) can be "
+                           f"located in this passage; {n_needed} are needed. The "
+                           f"item is dropped rather than topped up from another "
+                           f"article, which would put an absent string among the "
+                           f"options and restore the presence shortcut."),
+            })
             continue
+
+        # Gold placement is drawn once, before any tier is tried, so which tier
+        # succeeds cannot shift where the gold lands.
+        rng = _rng(seed, lang, partition, r["item_id"])
+        gold_index = int(rng.integers(0, n_options))
+        gold = gold_index + 1
+
+        # Tier 1 is the candidates whose surface shape MATCHES the gold's, so
+        # the gold is not the only date-shaped (or only non-date-shaped) option
+        # and cannot be picked out by semantic type without reading. Tier 2 is
+        # every same-article candidate.
+        #
+        # Tier 1 is accepted only if its window still fits inside
+        # context_budget_tokens, which makes the preference genuinely free: it
+        # never widens a window, never costs a token, and never drops an item
+        # that tier 2 would have kept. That is why surface shape can be a real
+        # preference here where in `_reach` it is only a tie-break.
+        tiers: list[list[dict]] = []
+        if match_surface:
+            tiers.append([c for c in candidates if c["surface_penalty"] == 0])
+        tiers.append(candidates)
+
+        chosen = options = required = win = None
+        last_error: str | None = None
+        for tier_index, tier in enumerate(tiers):
+            is_last = tier_index == len(tiers) - 1
+            if len(tier) < n_needed:
+                continue
+            picked = choose_covering_distractors(tier, gold_lo, gold_hi, n_needed)
+            if picked is None:
+                last_error = (f"no placement of {n_needed} distinct same-article "
+                              f"answers around the gold span could be found.")
+                continue
+            cand_chosen, _cover = picked
+            cand_options = [c["text"] for c in cand_chosen]
+            cand_options.insert(gold_index, gold_text)
+            cand_required = sorted([(gold_lo, gold_hi)]
+                                   + [c["span"] for c in cand_chosen])
+            try:
+                # The window is placed AFTER the options are chosen, because the
+                # effective budget depends on how many tokens this item's own
+                # question and options consume -- and because the window must
+                # cover their spans.
+                cand_win = windowed_passage(cfg, tok, r, cand_options, gold,
+                                            cand_required)
+            except P1ItemTooLong as exc:
+                last_error = str(exc)
+                continue
+            if cand_win["overflowed_budget"] and not is_last:
+                # Tier 1 would only fit by spending extra tokens. Prefer the
+                # cheaper item over the better-matched one.
+                continue
+            chosen, options, required, win = (cand_chosen, cand_options,
+                                              cand_required, cand_win)
+            break
+
+        if win is None:
+            # Counted and reported, never silently truncated. Only P1ItemTooLong
+            # is absorbed above, so a genuine bug in window placement still stops
+            # the build.
+            dropped.append({"item_id": r["item_id"],
+                            "reason": last_error or "no usable distractor set"})
+            continue
+        distractor_ids = [c["item_id"] for c in chosen]
 
         items.append({
             "item_id": r["item_id"],
@@ -711,8 +872,12 @@ def build_mcq_items(cfg: dict[str, Any], lang: str, rows: list[dict],
             "source_id": r["source_id"],
             "prompt_tokens": win["prompt_tokens"],
             "context_tokens": win["context_tokens"],
+            "covering_span_tokens": win["covering_span_tokens"],
+            "overflowed_budget": win["overflowed_budget"],
             "full_context_tokens": None,
-            "answer_in_passage": r["answer"] in win["passage"],
+            "answer_in_passage": gold_text in win["passage"],
+            "n_options_in_passage": sum(1 for o in options
+                                        if o in win["passage"]),
         })
 
     return items, dropped
@@ -745,12 +910,31 @@ def assert_items_wellformed(cfg: dict[str, Any], items: list[dict]) -> None:
                 f"{it['item_id']}: {n_correct} options equal the correct answer; "
                 f"exactly one is required."
             )
-        if it["group_id"] in {d.rsplit(
-                cfg_mod.require(cfg, "finetune.item_id_separator"), 1)[0]
-                for d in it["distractor_item_ids"]}:
+        sep = cfg_mod.require(cfg, "finetune.item_id_separator")
+        source_articles = {d.rsplit(sep, 1)[0] for d in it["distractor_item_ids"]}
+        if source_articles != {it["group_id"]}:
             raise P1DataError(
-                f"{it['item_id']}: a distractor came from the item's own "
-                f"article, which can make it a second correct answer."
+                f"{it['item_id']}: distractors came from {sorted(source_articles)} "
+                f"rather than from the item's own article {it['group_id']!r}. An "
+                f"answer from another article is not in this passage, so the "
+                f"gold would be identifiable by presence alone."
+            )
+        if it["item_id"] in it["distractor_item_ids"]:
+            raise P1DataError(
+                f"{it['item_id']}: the item's own answer was reused as one of "
+                f"its distractors.")
+
+        # THE anti-shortcut invariant. Checked per item rather than trusted to
+        # the construction, because it is the single property that stops the
+        # task being solvable without reading: if every option is present,
+        # "pick the one that appears in the passage" is a 1-in-4 guess.
+        absent = [o for o in opts if o not in it["passage"]]
+        if absent:
+            raise P1DataError(
+                f"{it['item_id']}: option(s) {absent} are not verbatim in the "
+                f"passage. Presence would then identify the gold without any "
+                f"reading, which is the failure algorithm_version 2 exists to "
+                f"remove."
             )
 
 
@@ -769,6 +953,136 @@ def surface_homogeneity(items: list[dict]) -> float:
         if all(_digit_class(o) == gold_class for o in it["options"]):
             n += 1
     return n / len(items)
+
+
+def lexical_shortcut_accuracy(items: list[dict]) -> float:
+    """Accuracy of "choose the option that appears verbatim in the passage".
+
+    THE headline diagnostic. Version 1 scored ~0.96 here in English and ~0.92 in
+    Bangla, on a gold-in-passage rate of 1.00 in both -- the task was solvable
+    without reading, and solvable to a language-dependent degree.
+
+    Ties are scored as the heuristic's own expected value, 1/k over the k
+    options it cannot separate, rather than by breaking them in the gold's
+    favour or against it. Under version 2 every option is present, so k is 4 and
+    the value is exactly 0.25 in every language.
+    """
+    if not items:
+        return 0.0
+    total = 0.0
+    for it in items:
+        present = [i for i, o in enumerate(it["options"], start=1)
+                   if o in it["passage"]]
+        if not present:
+            # No option is present: the heuristic has nothing to go on and
+            # guesses uniformly over all four.
+            total += 1.0 / len(it["options"])
+        elif it["gold"] in present:
+            total += 1.0 / len(present)
+    return total / len(items)
+
+
+def gold_position_uniformity(items: list[dict]) -> dict[str, Any]:
+    """Where the gold sits among the four option spans, by position in passage.
+
+    A window placed over the four option spans could in principle leave the gold
+    systematically central (or systematically at an edge), which would be a new
+    positional shortcut replacing the substring one. This measures the rank of
+    the gold's first occurrence among the four options' first occurrences, and
+    the build records it so the claim is audited rather than assumed.
+    """
+    counts = {1: 0, 2: 0, 3: 0, 4: 0}
+    n = 0
+    for it in items:
+        positions = []
+        for i, opt in enumerate(it["options"], start=1):
+            at = it["passage"].find(opt)
+            if at < 0:
+                positions = []
+                break
+            positions.append((at, i))
+        if not positions:
+            continue
+        positions.sort()
+        rank = next(r for r, (_, i) in enumerate(positions, start=1)
+                    if i == it["gold"])
+        counts[rank] = counts.get(rank, 0) + 1
+        n += 1
+    return {"n_scored": n,
+            "share_by_rank": {str(k): (v / n if n else 0.0)
+                              for k, v in sorted(counts.items())}}
+
+
+def construction_diagnostics(items: list[dict], dropped: list[dict],
+                             n_source_rows: int) -> dict[str, Any]:
+    """Everything needed to judge whether this item set is learnable and fair.
+
+    Recorded per language and per partition in the split manifest. Nothing here
+    gates the build on its own -- `scripts/build_p1_splits.py` owns the
+    thresholds -- because a diagnostic that silently changes what gets built is
+    no longer a diagnostic.
+    """
+    n = len(items)
+    if n == 0:
+        return {"n_items": 0, "n_dropped": len(dropped)}
+
+    gold_letters: dict[str, int] = {}
+    for it in items:
+        key = str(it["gold"])
+        gold_letters[key] = gold_letters.get(key, 0) + 1
+
+    n_opts = {len(it["options"]) for it in items}
+    dup = sum(1 for it in items
+              if len({normalise_answer(o) for o in it["options"]})
+              != len(it["options"]))
+    gold_in = sum(1 for it in items if it["gold_text"] in it["passage"])
+    distractor_in = 0
+    distractor_total = 0
+    for it in items:
+        for i, o in enumerate(it["options"], start=1):
+            if i == it["gold"]:
+                continue
+            distractor_total += 1
+            distractor_in += int(o in it["passage"])
+
+    prompts = sorted(it["prompt_tokens"] for it in items)
+    covers = sorted(it.get("covering_span_tokens") or 0 for it in items)
+
+    def pct(v: list[int], q: float) -> int:
+        return v[min(len(v) - 1, int(q * len(v)))]
+
+    same_article = sum(
+        1 for it in items
+        if all(d.rsplit("#", 1)[0] == it["group_id"]
+               for d in it["distractor_item_ids"]))
+
+    return {
+        "n_items": n,
+        "n_dropped": len(dropped),
+        "drop_rate": len(dropped) / n_source_rows if n_source_rows else 0.0,
+        "option_counts": sorted(n_opts),
+        "n_items_with_duplicate_options": dup,
+        "gold_letter_distribution": gold_letters,
+        "gold_letter_max_share": max(gold_letters.values()) / n,
+        "gold_in_context_rate": gold_in / n,
+        "distractor_in_context_rate": (distractor_in / distractor_total
+                                       if distractor_total else 0.0),
+        "lexical_shortcut_accuracy": lexical_shortcut_accuracy(items),
+        "gold_position": gold_position_uniformity(items),
+        "same_article_distractor_rate": same_article / n,
+        "option_surface_homogeneity": surface_homogeneity(items),
+        "prompt_tokens_median": pct(prompts, 0.50),
+        "prompt_tokens_p90": pct(prompts, 0.90),
+        "prompt_tokens_max": prompts[-1],
+        "covering_span_tokens_median": pct(covers, 0.50),
+        "covering_span_tokens_p90": pct(covers, 0.90),
+        "n_overflowed_budget": sum(1 for it in items
+                                   if it.get("overflowed_budget")),
+        # Truncation is not a thing that can happen here: the prompt length is
+        # measured and the item dropped if it does not fit. Recorded as 0 so the
+        # absence is a stated fact rather than a missing field.
+        "truncation_rate": 0.0,
+    }
 
 
 def choice_digest(items: list[dict]) -> str:
@@ -828,6 +1142,14 @@ def window_stats(items: list[dict]) -> dict[str, Any]:
         "context_tokens_p90": pct(contexts, 0.90),
         "evidence_retained": sum(1 for it in items
                                  if it["answer_in_passage"]) / len(items),
+        # Under v2 the window must contain all four options, not just the gold,
+        # so this is the property that actually matters and it is recorded
+        # alongside the older one rather than replacing it.
+        "all_options_retained": sum(
+            1 for it in items
+            if it["n_options_in_passage"] == len(it["options"])) / len(items),
+        "n_overflowed_budget": sum(1 for it in items
+                                   if it.get("overflowed_budget")),
     }
 
 
@@ -880,29 +1202,37 @@ def build_language(cfg: dict[str, Any], lang: str) -> dict[str, Any]:
             f"{n_dropped} dropped, from {len(rows)} source rows. Every row must "
             f"land in exactly one partition or be accounted for as dropped."
         )
-    if n_dropped / len(rows) > MAX_EMPTY_ROW_FRACTION:
+    if n_dropped / len(rows) > MAX_CONSTRUCTION_DROP_FRACTION:
         raise P1DataError(
             f"{lang}: {n_dropped}/{len(rows)} rows ({n_dropped / len(rows):.1%}) "
-            f"have a question and four options that alone exceed "
-            f"max_seq_tokens, above the {MAX_EMPTY_ROW_FRACTION:.0%} ceiling. "
-            f"A drop rate this high would itself be a language-correlated "
-            f"artefact; stop and look at the corpus."
+            f"could not be built into a four-option item whose passage contains "
+            f"all four options, above the "
+            f"{MAX_CONSTRUCTION_DROP_FRACTION:.0%} ceiling. Stop and look at the "
+            f"corpus rather than raising the ceiling: the ABSOLUTE rate is only "
+            f"half the concern, and scripts/build_p1_splits.py separately "
+            f"refuses a build whose drop rates diverge between languages."
         )
 
     eval_ids = select_heldout_eval(cfg, lang, heldout_items)
     gold_by_id = {it["item_id"]: it["gold"] for it in heldout_items}
 
     # Recorded, not asserted. This is the share of items on which the gold
-    # cannot be picked out by digit-class alone -- the give-away that the
-    # topical + surface matching exists to remove. It will not reach 1.0: an
-    # oddly shaped answer sometimes has no same-class neighbour, and the builder
-    # widens rather than fabricating one. Auditing the number beats assuming it.
+    # cannot be picked out by digit-class alone -- the give-away that surface
+    # matching exists to reduce. It will not reach 1.0: surface shape is only a
+    # tie-break between equally cheap same-article candidates and is never
+    # allowed to widen the window. Auditing the number beats assuming it.
     homogeneity = {
         part: surface_homogeneity(items)
         for part, items in (("train", train_items), ("heldout", heldout_items))
     }
+    diagnostics = {
+        "train": construction_diagnostics(train_items, train_dropped, len(rows)),
+        "heldout": construction_diagnostics(heldout_items, heldout_dropped,
+                                            len(rows)),
+    }
 
     return {
+        "diagnostics": diagnostics,
         "lang": lang,
         "rows": rows,
         "report": report,
@@ -978,17 +1308,71 @@ def verify_against_manifest(built: dict[str, Any], manifest: dict[str, Any]) -> 
             )
 
 
+def train_equalise_cap(cfg: dict[str, Any],
+                       manifest: dict[str, Any]) -> int | None:
+    """Common training-set size across `finetune.final_scope_languages`.
+
+    English yields more constructible items than Bangla, so without this the FT
+    arms would differ in how many gradient steps each language got, and "English
+    gained more from fine-tuning" could not be separated from "English trained
+    on more data". The cap is min(n_train_items) over the FINAL-SCOPE languages
+    only, so rebuilding a provenance language alongside them cannot move it.
+
+    Returns None when equalisation is off.
+    """
+    if not cfg_mod.require(cfg, "finetune.equalise_train_partition"):
+        return None
+    scope = cfg_mod.require(cfg, "finetune.final_scope_languages")
+    langs = manifest.get("languages") or {}
+    missing = [l for l in scope if l not in langs]
+    if missing:
+        raise P1DataError(
+            f"the split manifest is missing final-scope language(s) {missing}, "
+            f"so the common training-set size cannot be determined. Rebuild the "
+            f"manifest for every language before training."
+        )
+    return min(int(langs[l]["n_train_items"]) for l in scope)
+
+
+def select_equalised_train(cfg: dict[str, Any], lang: str,
+                           train_items: list[dict], cap: int) -> list[str]:
+    """Deterministic subsample of a train partition down to `cap` item ids.
+
+    Same mechanism as `select_heldout_eval`: seeded from split_seed and the
+    language, sorted for a stable order, and returning ids rather than items so
+    the choice is recordable and checkable.
+    """
+    seed = cfg_mod.require(cfg, "finetune.split_seed")
+    ids = sorted(it["item_id"] for it in train_items)
+    if len(ids) <= cap:
+        return ids
+    rng = _rng(seed, lang, "train_equalise")
+    order = rng.permutation(len(ids))
+    return sorted(ids[int(i)] for i in order[:cap])
+
+
 def load_partition(cfg: dict[str, Any], lang: str, partition: str,
                    manifest: dict[str, Any] | None = None) -> list[dict]:
     """Rebuild one partition and verify it against the frozen manifest.
 
     This is the only sanctioned way for training or evaluation code to get P1
     items -- it is the P1 analogue of `data.load_language`.
+
+    The `train` partition is returned already trimmed to the common size across
+    the final-scope languages. Doing the trim HERE rather than in the caller is
+    deliberate: every training run goes through this function, so no run can
+    accidentally train on the untrimmed set.
     """
     manifest = manifest or load_split_manifest()
     built = build_language(cfg, lang)
     verify_against_manifest(built, manifest)
     if partition == "train":
+        cap = train_equalise_cap(cfg, manifest)
+        if cap is None or len(built["train_items"]) <= cap:
+            return built["train_items"]
+        keep = set(select_equalised_train(cfg, lang, built["train_items"], cap))
+        return [it for it in built["train_items"] if it["item_id"] in keep]
+    if partition == "train_full":
         return built["train_items"]
     if partition == "heldout":
         return built["heldout_items"]
@@ -997,7 +1381,7 @@ def load_partition(cfg: dict[str, Any], lang: str, partition: str,
         return [it for it in built["heldout_items"] if it["item_id"] in keep]
     raise P1DataError(
         f"unknown partition {partition!r}; allowed "
-        f"{PARTITIONS + ('heldout_eval',)}")
+        f"{PARTITIONS + ('heldout_eval', 'train_full')}")
 
 
 def build_p1_prompt(cfg: dict[str, Any], item: dict[str, Any]) -> str:

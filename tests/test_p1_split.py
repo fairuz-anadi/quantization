@@ -47,9 +47,21 @@ def test_manifest_pins_the_dataset_revision_from_the_config(cfg, manifest):
     assert len(manifest["revision"]) == 40, "a revision must be a full commit SHA"
 
 
-def test_manifest_covers_exactly_the_frozen_languages(cfg, manifest):
-    assert set(manifest["languages"]) == set(
-        cfg_mod.require(cfg, "benchmark.languages"))
+def test_manifest_covers_exactly_the_final_scope(cfg, manifest):
+    """The P1 CORPUS is the final scope, not all of benchmark.languages.
+
+    P0 evaluated five languages and those results stand. P0 reads
+    configs/item_id_manifest.json and never touches this manifest, so narrowing
+    the P1 corpus cannot reach it. Sinhala was additionally measured as
+    unbuildable under algorithm_version 2 -- 23.5% of its rows -- and Assamese
+    and Nepali were already out of scope.
+    """
+    scope = cfg_mod.require(cfg, "finetune.final_scope_languages")
+    assert set(manifest["languages"]) == set(scope)
+    assert manifest["final_scope_languages"] == scope
+    known = cfg_mod.require(cfg, "benchmark.languages")
+    assert set(scope) <= set(known), (
+        "a P1 language must still be one of the frozen P0 languages")
 
 
 def test_split_is_grouped_by_article_not_by_row(cfg, manifest):
@@ -57,8 +69,10 @@ def test_split_is_grouped_by_article_not_by_row(cfg, manifest):
     assert manifest["group_key"], "a grouped split needs a group key"
 
 
-@pytest.mark.parametrize("lang", ["eng_Latn", "ben_Beng", "sin_Sinh",
-                                  "asm_Beng", "npi_Deva"])
+SCOPE = cfg_mod.load()["finetune"]["final_scope_languages"]
+
+
+@pytest.mark.parametrize("lang", SCOPE)
 class TestPerLanguage:
     """The invariant the whole design rests on: no article on both sides."""
 

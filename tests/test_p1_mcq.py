@@ -23,10 +23,13 @@ def cfg():
 
 
 def _rows(n_articles=60, per_article=5):
-    """Synthetic corpus with distinct per-article vocabulary.
+    """Synthetic corpus shaped like multi-wiki-qa: one context per article.
 
-    Contexts differ in wording so the tf-idf neighbour ranking has something
-    real to rank; answers vary in shape so surface matching is exercised.
+    Every question about an article shares that article's context, and every
+    answer appears verbatim inside it. That is what version 2 requires: the
+    distractors are the answers to the article's OTHER questions, so they have
+    to be locatable in the same passage. Answers vary in shape so the surface
+    preference is exercised.
     """
     shapes = [
         "answer text {a}-{q}",
@@ -37,21 +40,28 @@ def _rows(n_articles=60, per_article=5):
     ]
     out = []
     for a in range(n_articles):
-        for q in range(per_article):
+        answers = [shapes[q % len(shapes)].format(a=a, q=q)
+                   for q in range(per_article)]
+        # One shared context per article, carrying every answer, with filler
+        # between the facts so the window has something to expand into and the
+        # covering span is not trivially the whole article.
+        parts = [f"Topic{a % 7} matters here. Article {a:03d} covers "
+                 f"subject{a} and term{a % 11}."]
+        for q, ans in enumerate(answers):
+            parts.append(f"filler{a} word{q} padding{q} more{q} text{q}.")
+            parts.append(f"Fact {q}: {ans} ends it.")
+        context = " ".join(parts)
+        for q, ans in enumerate(answers):
             out.append({
                 "group_id": f"Article {a:03d}",
-                "context": (f"Topic{a % 7} matters here. Article {a:03d} covers "
-                            f"subject{a} with detail{a}{q} and term{a % 11}."),
+                "context": context,
                 "question": f"question {q} about article {a}?",
-                "answer": shapes[q % len(shapes)].format(a=a, q=q),
+                "answer": ans,
                 "source_id": f"http://example.invalid/{a}",
                 "ordinal": q,
                 "item_id": f"Article {a:03d}#{q}",
+                "answer_start": context.index(ans),
             })
-    # The answer must be locatable in the context: the window is centred on it.
-    for rec in out:
-        rec["context"] = f"{rec['context']} Fact: {rec['answer']} ends it."
-        rec["answer_start"] = rec["context"].index(rec["answer"])
     return out
 
 
@@ -127,12 +137,79 @@ def test_gold_position_is_not_constant(built):
 # leakage
 # --------------------------------------------------------------------------- #
 
-def test_no_distractor_comes_from_the_items_own_article(built):
-    """A same-article answer can be a second defensible answer to the context."""
+def test_every_distractor_comes_from_the_items_own_article(built):
+    """The v1 rule INVERTED, and the inversion is the whole repair.
+
+    v1 excluded same-article answers, on the grounds that a fact from the same
+    context might be a second defensible answer. The cost of that rule was far
+    worse than the risk it avoided: a distractor from another article is not in
+    this passage, so the gold became the only option present and the item was
+    solvable by substring presence alone.
+    """
+    for partition in ("train", "heldout"):
+        for it in built[partition]:
+            for did in it["distractor_item_ids"]:
+                assert did.rsplit("#", 1)[0] == it["group_id"], (
+                    f"{it['item_id']}: distractor {did!r} is from another "
+                    f"article, so its text is not in this passage")
+
+
+def test_every_option_appears_verbatim_in_the_passage(built):
+    """THE anti-shortcut invariant, checked on built items rather than assumed."""
+    for partition in ("train", "heldout"):
+        for it in built[partition]:
+            for i, opt in enumerate(it["options"], start=1):
+                assert opt in it["passage"], (
+                    f"{it['item_id']}: option {i} ({opt!r}) is not in the "
+                    f"passage, so presence identifies the gold without reading")
+
+
+def test_the_substring_heuristic_is_worth_exactly_a_guess(built):
+    """v1 scored ~0.96 here. Anything above chance is a shortcut."""
+    for partition in ("train", "heldout"):
+        acc = p1data.lexical_shortcut_accuracy(built[partition])
+        assert abs(acc - 0.25) < 1e-9, (
+            f"{partition}: 'choose the option that appears in the passage' "
+            f"scores {acc:.4f}, not chance")
+
+
+def test_gold_and_distractors_are_present_at_the_same_rate(built):
+    """The asymmetry, stated directly: v1 was 100% against ~10%."""
+    for partition in ("train", "heldout"):
+        d = p1data.construction_diagnostics(built[partition], [],
+                                            len(built[partition]))
+        assert d["gold_in_context_rate"] == 1.0
+        assert d["distractor_in_context_rate"] == 1.0
+
+
+def test_an_absent_option_is_rejected_by_the_validator(cfg, built):
+    """The invariant is enforced, not merely satisfied by luck."""
+    it = dict(built["train"][0])
+    it["passage"] = it["passage"].replace(it["options"][0], "REDACTED", 1)
+    with pytest.raises(P1DataError, match="not verbatim in the passage"):
+        p1data.assert_items_wellformed(cfg, [it])
+
+
+def test_a_cross_article_distractor_is_rejected_by_the_validator(cfg, built):
+    it = dict(built["train"][0])
+    it["distractor_item_ids"] = ["Some Other Article#0"] + \
+        list(it["distractor_item_ids"][1:])
+    with pytest.raises(P1DataError, match="rather than from the item's own"):
+        p1data.assert_items_wellformed(cfg, [it])
+
+
+def test_training_distractors_never_come_from_held_out_articles(built):
+    """Held-out data must not enter training, not even as an option string.
+
+    Under v2 this holds by construction -- distractors are same-article and the
+    split is grouped by article -- but it is the property that actually matters,
+    so it is still asserted rather than argued.
+    """
+    heldout = set(built["heldout_groups"])
     for it in built["train"]:
         for did in it["distractor_item_ids"]:
-            assert did.rsplit("#", 1)[0] != it["group_id"], (
-                f"{it['item_id']}: distractor {did!r} is from the same article")
+            assert did.rsplit("#", 1)[0] not in heldout, (
+                f"{it['item_id']}: distractor {did!r} came from a held-out article")
 
 
 def test_training_distractors_never_come_from_held_out_articles(built):

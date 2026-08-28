@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quantlang import config as cfg_mod  # noqa: E402
+from quantlang import finetune  # noqa: E402
 from quantlang.evaluate import evaluate_cell  # noqa: E402
 from quantlang.model import PRECISIONS  # noqa: E402
 
@@ -48,6 +49,18 @@ def main() -> int:
                     help="forward passes per item; >1 for the latency protocol")
     ap.add_argument("--store-prompts", action="store_true")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--local-checkpoint", default=None,
+                    help="P1 FT arm: score the merged fine-tuned checkpoint in "
+                         "this directory instead of the pinned Hub model. The "
+                         "result alias becomes finetune.ft_alias(...) "
+                         "automatically, so an FT cell can never collide with a "
+                         "Base cell.")
+    ap.add_argument("--ft-lang", default=None,
+                    help="the language the checkpoint was fine-tuned ON. "
+                         "Required with --local-checkpoint, and deliberately "
+                         "separate from --langs: a cross-lingual cell would be "
+                         "a different experiment, so naming both makes the "
+                         "distinction explicit in the filename.")
     args = ap.parse_args()
 
     cfg = cfg_mod.load()
@@ -96,9 +109,47 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    # ---- the FT arm ---------------------------------------------------------
+    # Before this existed there was no way to evaluate a fine-tuned checkpoint
+    # through the sanctioned evaluator at all. The one full P1 evaluation was
+    # therefore run by ad-hoc code, which loaded the base model from the Hub and
+    # produced an "FT" cell whose logits were bit-identical to the Base arm's.
+    # Every guard below exists to make that specific mistake impossible.
+    result_alias = entry["alias"]
+    local_checkpoint = args.local_checkpoint
+    if local_checkpoint:
+        if not args.ft_lang:
+            raise SystemExit(
+                "FATAL: --local-checkpoint requires --ft-lang, the language the "
+                "checkpoint was fine-tuned on. It goes into the result alias, so "
+                "an FT cell is self-describing in its own filename.")
+        if args.ft_lang not in known:
+            raise SystemExit(
+                f"FATAL: --ft-lang {args.ft_lang} is not in the frozen language "
+                f"set {known}.")
+        ckpt = Path(local_checkpoint)
+        if not ckpt.is_dir():
+            raise SystemExit(
+                f"FATAL: --local-checkpoint {local_checkpoint} is not a "
+                f"directory. Stopping rather than silently falling back to the "
+                f"base model, which would produce an FT cell identical to Base.")
+        if not any(ckpt.glob("*.safetensors")):
+            raise SystemExit(
+                f"FATAL: {local_checkpoint} holds no *.safetensors weights. "
+                f"That is not a merged checkpoint.")
+        result_alias = finetune.ft_alias(entry["alias"], args.ft_lang)
+    elif args.ft_lang:
+        raise SystemExit(
+            "FATAL: --ft-lang without --local-checkpoint. Naming a fine-tuning "
+            "language while scoring the base model would mislabel a Base cell "
+            "as an FT one.")
+
     outdir = Path(args.outdir)
     print(f"model      : {entry['hf_id']}")
     print(f"revision   : {revision}")
+    print(f"arm        : {'finetuned on ' + args.ft_lang if local_checkpoint else 'base'}")
+    print(f"weights    : {local_checkpoint or 'hub @ ' + revision[:12]}")
+    print(f"alias      : {result_alias}")
     print(f"precisions : {precisions}")
     print(f"languages  : {langs}")
     print(f"outdir     : {outdir}\n")
@@ -113,7 +164,7 @@ def main() -> int:
             meta = evaluate_cell(
                 cfg,
                 hf_id=entry["hf_id"],
-                model_alias=entry["alias"],
+                model_alias=result_alias,
                 revision=revision,
                 precision=precision,
                 lang=lang,
@@ -124,6 +175,7 @@ def main() -> int:
                 repeats=args.repeats,
                 store_prompts=args.store_prompts,
                 device=args.device,
+                local_checkpoint=local_checkpoint,
             )
             print(f"    acc={meta['accuracy']:.4f} ({meta['n_correct']}/{meta['n_items']})"
                   f"  median={meta['median_latency_ms']:.1f}ms"

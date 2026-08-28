@@ -79,8 +79,22 @@ def evaluate_cell(
     repeats: int = 1,
     store_prompts: bool = False,
     device: str = "cuda:0",
+    local_checkpoint: str | None = None,
 ) -> dict[str, Any]:
-    """Run one cell end to end and write per-item JSONL + a meta manifest."""
+    """Run one cell end to end and write per-item JSONL + a meta manifest.
+
+    `local_checkpoint` (P1 only) scores a merged fine-tuned checkpoint from disk
+    instead of the pinned Hub model. Everything else is identical -- same items,
+    same prompt, same letter_logit scoring, same quantization kwargs -- so the
+    only thing that differs between the Base and FT arms is the weights.
+
+    Leaving it None reproduces P0's behaviour exactly.
+
+    It is a REQUIRED parameter of the FT arm, not an optional nicety. Before it
+    existed there was no sanctioned way to evaluate a fine-tuned checkpoint at
+    all, the one full P1 evaluation was run by ad-hoc code outside the repo, and
+    it silently scored the base model -- see `finetune.assert_merge_moved`.
+    """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -93,12 +107,24 @@ def evaluate_cell(
             f"must be an explicit config decision, not an implicit one."
         )
 
+    # Checked before anything expensive: a missing FT checkpoint must stop the
+    # run outright, because loading the base model instead would produce an
+    # "FT" cell identical to the Base arm -- and that has already happened once.
+    if local_checkpoint is not None and not Path(local_checkpoint).is_dir():
+        raise FileNotFoundError(
+            f"local_checkpoint {local_checkpoint!r} is not a directory. A "
+            f"missing FT checkpoint must stop the run: loading the base model "
+            f"instead would produce an 'FT' cell identical to the Base arm."
+        )
+
     rows = data_mod.load_language(cfg, lang)
     if limit is not None:
         rows = rows[:limit]
 
     load_t0 = time.perf_counter()
-    tok, model, layer_counts = model_mod.load(cfg, hf_id, revision, precision, device)
+    tok, model, layer_counts = model_mod.load(cfg, hf_id, revision, precision,
+                                              device,
+                                              local_checkpoint=local_checkpoint)
     load_seconds = time.perf_counter() - load_t0
     option_ids = model_mod.option_token_ids(cfg, tok)
 
@@ -148,6 +174,12 @@ def evaluate_cell(
             record = {
                 "run_id": run_id,
                 "model": hf_id,
+                # Where the WEIGHTS came from, recorded per item. "hub"
+                # means the pinned base model; anything else is a merged FT
+                # checkpoint. Without this, a Base row and an FT row are
+                # indistinguishable in the raw output.
+                "weights_from": local_checkpoint or "hub",
+                "arm": "base" if local_checkpoint is None else "finetuned",
                 "model_alias": model_alias,
                 "model_revision": revision,
                 "precision": precision,
@@ -174,6 +206,8 @@ def evaluate_cell(
         "run_id": run_id,
         "tag": tag,
         "model": hf_id,
+        "weights_from": local_checkpoint or "hub",
+        "arm": "base" if local_checkpoint is None else "finetuned",
         "model_alias": model_alias,
         "model_revision": revision,
         "precision": precision,
