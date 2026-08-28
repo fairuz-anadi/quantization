@@ -333,9 +333,17 @@ def main() -> int:
         print(f"\nwrote {path}")
 
     if not args.no_gpu:
-        print("\nGATE PASSED: the item set carries no substring shortcut and "
-              "the base model has room to improve. Fine-tuning is worth "
-              "starting.")
+        flagged = report.get("low_headroom_languages") or []
+        print("\nGATE PASSED: the item set carries no substring shortcut.")
+        if flagged:
+            # Do not print "the base model has room to improve" directly under a
+            # warning that says it does not. The per-language verdict is the
+            # honest summary, and it is what the paper has to report.
+            clear = [l for l in report["base_accuracy"] if l not in flagged]
+            print(f"  headroom: {clear} have room to improve; {flagged} do not "
+                  f"and their accuracy-based FT claims are expected to be null.")
+        else:
+            print("  headroom: every language has room to improve.")
     return 0
 
 
