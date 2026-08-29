@@ -194,6 +194,20 @@ finetune:
   # Assamese remains unmeasured; it was never in scope.
   final_scope_languages: [eng_Latn, ben_Beng]
 
+  # ---- P1-Strong ------------------------------------------------------------
+  # One additional condition, added 2026-08-29 AFTER P1-Standard returned a null
+  # on both research questions. It separates "language adaptation does not
+  # affect quantization behaviour" from "one epoch of it was not enough" --
+  # claims a single adaptation strength cannot tell apart.
+  #
+  # Bangla only, and `epochs` is the ONLY factor that moves. Hypotheses and the
+  # analysis plan were fixed before the run in
+  # docs/P1_STRONG_PREREGISTRATION.md, committed ahead of any result.
+  #
+  #   [notebook letter, language, epochs]
+  strong_sessions:
+    - [D, ben_Beng, 3]
+
   # English yields more constructible items than Bangla (see
   # `distractors.source` below), so the two training partitions are trimmed to
   # a common size before training. Without this, "English gained more from

@@ -279,3 +279,40 @@ def test_the_notebooks_only_read_keys_the_smoke_test_writes():
         assert f'"{key}"' in smoke, (
             f"notebooks read check key {key!r}, which run_p1_smoke.py never "
             f"writes")
+
+
+def test_p1_strong_notebook_actually_carries_its_epoch_count():
+    """Every place the strong condition differs must differ, or it is not strong.
+
+    The generator wires `epochs` into four separate places: the finetune flag,
+    the merged-checkpoint path, the eval alias, and the zip name. One of them
+    silently failed to substitute during development, producing a notebook that
+    LOOKED like P1-Strong, was titled P1-Strong, and would have run a plain
+    1-epoch fine-tune for eight hours before anyone noticed.
+    """
+    import json
+    nb_path = REPO / "notebooks" / "kaggle_p1_D_ben_Beng_3ep.ipynb"
+    if not nb_path.exists():                       # strong_sessions may be empty
+        return
+    src = "\n".join("".join(c["source"]) for c in
+                    json.loads(nb_path.read_text(encoding="utf-8"))["cells"])
+
+    assert '"--epochs", "3"' in src, "finetune cell does not request 3 epochs"
+    assert "--ft-epochs 3" in src, "eval cell would write a 1-epoch alias"
+    assert "__3ep" in src, "artefact paths would collide with P1-Standard"
+
+    std = REPO / "notebooks" / "kaggle_p1_C_ben_Beng.ipynb"
+    std_src = "\n".join("".join(c["source"]) for c in
+                        json.loads(std.read_text(encoding="utf-8"))["cells"])
+    assert "--epochs" not in std_src, (
+        "P1-Standard must keep reading epochs from the frozen config")
+    assert "__3ep" not in std_src
+
+
+def test_ft_alias_marks_strength_and_leaves_one_epoch_alone():
+    """Completed P1-Standard cells must keep the aliases they were written with."""
+    from quantlang import finetune as ft
+    assert ft.ft_alias("m", "ben_Beng") == "m-ft-ben_Beng"
+    assert ft.ft_alias("m", "ben_Beng", epochs=1) == "m-ft-ben_Beng"
+    assert ft.ft_alias("m", "ben_Beng", epochs=3) == "m-ft3ep-ben_Beng"
+    assert ft.ft_alias("m", "ben_Beng", epochs=3) != ft.ft_alias("m", "ben_Beng")

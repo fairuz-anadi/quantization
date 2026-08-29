@@ -218,9 +218,15 @@ print(sorted(os.listdir("/kaggle/working")))'''),
     return nb(cells)
 
 
-def session_lang(lang: str, letter: str) -> dict:
+def session_lang(lang: str, letter: str, epochs: int = 1) -> dict:
+    strong = epochs != 1
+    sfx = "" if not strong else f"__{epochs}ep"
+    ep_args = "" if not strong else f', "--epochs", "{epochs}"'
+    ft_ep = "" if not strong else f' --ft-epochs {epochs}'
+    keep = f"p1_{lang}{sfx}"
     cells = [(k, v.format(
-        title=f"P1 session {letter} - {lang}",
+        title=(f"P1 session {letter} - {lang}" if not strong else
+               f"P1 session {letter} - {lang}, P1-Strong ({epochs} epochs)"),
         intro=(
             f"Fine-tunes {lang}, merges the adapter into an FP16 checkpoint, and "
             f"evaluates that checkpoint on BELEBELE at all three precisions.\\n\\n"
@@ -236,13 +242,13 @@ def session_lang(lang: str, letter: str) -> dict:
          '\ngate("scripts/freeze_p0.py")\ngate("-m", "pytest", "-q")'),
         ("markdown", f"""## Fine-tune {lang}
 
-One epoch of LoRA on the FP16 base, then `merge_and_unload` into a plain FP16
+{'One epoch' if not strong else f'{epochs} epochs'} of LoRA on the FP16 base, then `merge_and_unload` into a plain FP16
 checkpoint. The merge is now verified to have moved the weights -- if it has
 not, this cell fails rather than shipping a checkpoint that is the base model.
 
 The training partition is trimmed to the size shared by both final-scope
 languages, so each arm takes the same number of gradient steps."""),
-        ("code", GATE + f'\ngate("scripts/run_finetune.py", "--lang", "{lang}", "--outdir", "/kaggle/working/p1", "--tag", "main")'),
+        ("code", GATE + f'\ngate("scripts/run_finetune.py", "--lang", "{lang}", "--outdir", "/kaggle/working/p1", "--tag", "main"{ep_args})'),
         ("markdown", f"""## Evaluate the FT arm
 
 Three cells: {lang} x FP16 / INT8 / NF4, on the merged checkpoint, through the
@@ -255,10 +261,10 @@ collide with or be mistaken for a Base cell, and every row records
         # One physical line: a `!` magic does not honour backslash continuation.
         ("code", f'''SEED = __import__("yaml").safe_load(
     open("configs/experiment.yaml", encoding="utf-8"))["finetune"]["seeds"]["main"]
-MERGED = f"/kaggle/working/p1/merged/{lang}__seed{{SEED}}"
+MERGED = f"/kaggle/working/p1/merged/{lang}__seed{{SEED}}{sfx}"
 print(MERGED)
 
-!python scripts/run_eval.py --all-precisions --langs {lang} --local-checkpoint {{MERGED}} --ft-lang {lang} --outdir /kaggle/working/p1/results --tag main'''),
+!python scripts/run_eval.py --all-precisions --langs {lang} --local-checkpoint {{MERGED}} --ft-lang {lang}{ft_ep} --outdir /kaggle/working/p1/results --tag main'''),
         ("markdown", """## Confirm the FT arm is not the Base arm
 
 Read straight off the written cells. `arm` must say `finetuned` and
@@ -279,7 +285,7 @@ The merged FP16 checkpoint is ~5.75 GB and DERIVED -- rebuildable from the base
 model plus the adapter -- so it is not shipped. The adapter, the training
 metadata and every raw result are."""),
         ("code", f'''import os, shutil
-KEEP = "/kaggle/working/p1_{lang}_keep"
+KEEP = "/kaggle/working/{keep}_keep"
 os.makedirs(KEEP, exist_ok=True)
 shutil.copytree("/kaggle/working/p1/results", f"{{KEEP}}/results", dirs_exist_ok=True)
 for d in ["adapters"]:
@@ -290,7 +296,7 @@ for f in os.listdir("/kaggle/working/p1"):
         shutil.copy(f"/kaggle/working/p1/{{f}}", KEEP)
 shutil.copy("configs/p1_split_manifest.json", KEEP)
 
-shutil.make_archive("/kaggle/working/p1_{lang}", "zip", KEEP)
+shutil.make_archive("/kaggle/working/{keep}", "zip", KEEP)
 if os.path.isdir("/kaggle/working/p1/merged"):
     shutil.rmtree("/kaggle/working/p1/merged")
     print("removed the merged checkpoint (derived, rebuildable)")
@@ -317,6 +323,13 @@ def main() -> int:
         written.append(
             (OUT_DIR / f"kaggle_p1_{letter}_{lang}.ipynb",
              session_lang(lang, letter)))
+
+    # P1-Strong. One extra condition, Bangla only, epochs the only factor that
+    # moves. See docs/P1_STRONG_PREREGISTRATION.md.
+    for letter, lang, epochs in cfg_mod.require(cfg, "finetune.strong_sessions"):
+        written.append(
+            (OUT_DIR / f"kaggle_p1_{letter}_{lang}_{epochs}ep.ipynb",
+             session_lang(lang, letter, epochs=epochs)))
 
     for path, doc in written:
         path.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n",
