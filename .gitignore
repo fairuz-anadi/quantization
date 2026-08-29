@@ -21,3 +21,12 @@ paper/*.synctex.gz
 # NOTE: results/raw/ is intentionally NOT ignored. Raw run output is the
 # provenance for every number in the paper and is committed verbatim.
 .pytest_cache/
+
+# P1 adapter weights: 114 MB each, over GitHub's 100 MB per-file hard limit.
+# The adapters are kept locally and can be released via LFS or a model host if
+# the licence allows (multi-wiki-qa is cc-by-nc-sa-4.0). The per-item .jsonl
+# results ARE committed, and every accuracy claim traces to those.
+results/**/adapter_model.safetensors
+
+# Scratch analysis artefacts.
+results/_*.pkl

@@ -56,13 +56,16 @@ from the repo; the design lives in `configs/experiment.yaml` and
 design is not adjusted to make a check pass."""),
     ("code", '''# 1. Get the code.
 REPO_URL = "{repo}"
-REF      = "main"          # pin to a commit SHA for the run that goes in the paper
+REF      = "main"          # branch, tag or commit SHA -- all three work
 
 import os, subprocess, sys
 SRC = "/kaggle/working/quantlang"
 if not os.path.exists(SRC):
-    subprocess.run(["git", "clone", "--depth", "1", "-b", REF, REPO_URL, SRC],
-                   check=True)
+    # Full clone, then checkout. `-b` takes branch and tag names ONLY, so a
+    # commit SHA there fails with exit 128 -- and `--depth 1` fetches just the
+    # branch tip, which would not contain the SHA even if -b accepted one.
+    subprocess.run(["git", "clone", REPO_URL, SRC], check=True)
+    subprocess.run(["git", "-C", SRC, "checkout", "--quiet", REF], check=True)
 print(subprocess.run(["git", "-C", SRC, "rev-parse", "HEAD"],
                      capture_output=True, text=True).stdout.strip())
 os.chdir(SRC); sys.path.insert(0, SRC)'''),
@@ -145,13 +148,19 @@ Two questions, cheapest first.
    measured cell, read from `results/ALL_P0_RESULTS/tables/accuracy.csv` -- it
    is not a number chosen here.
 
-   Measured 2026-08-29: **0.970 English, 0.900 Bangla**, so English trips it.
+   Measured 2026-08-29 on 300 items drawn ONE PER ARTICLE: **0.9567 English
+   [0.9273, 0.9745], 0.8500 Bangla [0.8052, 0.8860]**, so English trips it and
+   Bangla's whole interval sits below the 0.8956 ceiling. An earlier reading of
+   0.970 / 0.900 came from `items[:300]`, which was 300 questions over the 38
+   alphabetically-first articles -- clustered, and optimistic on both counts.
    This is a WARNING, passed with `--acknowledge-low-headroom` and recorded in
    the report. It bounds what the FT arm can show on ACCURACY -- RQ3 is expected
    to be null for English -- but it does not make the FT arm vacuous: check 9
    below measures the FT model against the base at matched precision and found a
-   1.14 logit delta from three optimizer steps, against 0.000000 for the invalid
-   v1 run. Empty headroom and an unchanged model are different claims."""),
+   1.156 logit delta from three optimizer steps, against 0.000000 for the
+   invalid v1 run. Empty headroom and an unchanged model are different claims.
+   Borne out by the full runs: English cut its training loss 0.3396 -> 0.1168
+   and Bangla 0.4352 -> 0.2099, while neither gained accuracy on BELEBELE."""),
         ("code", GATE + f'\ngate("scripts/check_p1_learnability.py", *"--langs {lang_args}".split(), "--outdir", "/kaggle/working/p1_gate", "--acknowledge-low-headroom")'),
         ("markdown", """## The 20-item smoke test
 

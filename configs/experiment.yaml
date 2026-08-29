@@ -173,8 +173,25 @@ finetune:
   # rows are unbuildable at max_seq_tokens=2048, against 0.7% (English) and 6.9%
   # (Bangla). A 23.5% drop rate makes the surviving Sinhala items a
   # differently-selected sample, which is a confound rather than a cost.
-  # Assamese and Nepali were not measured -- they were already out of scope, and
-  # section 7's window-availability figures put them between Bangla and Sinhala.
+  # MEASURED 2026-08-29, when a four-language grid was reconsidered. Nepali and
+  # Sinhala were both built and both refused by
+  # p1data.MAX_CONSTRUCTION_DROP_FRACTION (0.08):
+  #
+  #     eng_Latn  0.6%   3944 train items
+  #     ben_Beng  5.4%   3732 train items
+  #     npi_Deva  9.2%   459/5005 rows unbuildable   -> over the 8% ceiling
+  #     sin_Sinh 23.5%  1173/5000 rows unbuildable   -> far over it
+  #
+  # Nepali misses by 1.2 points and would pass the 10% cross-language SPREAD
+  # gate, so it is a judgement call rather than a hard exclusion. It was still
+  # declined: Nepali yields roughly 3,640 train items, below Bangla's 3,732, so
+  # admitting it lowers the equalisation cap and changes the English and Bangla
+  # training partitions -- invalidating P1 sessions B and C, which are complete.
+  # The cost is a rerun of all three arms for a third null. Sinhala is not a
+  # judgement call: at 23.5% the surviving items are a differently selected
+  # sample, which is the confound this gate exists to catch.
+  #
+  # Assamese remains unmeasured; it was never in scope.
   final_scope_languages: [eng_Latn, ben_Beng]
 
   # English yields more constructible items than Bangla (see
