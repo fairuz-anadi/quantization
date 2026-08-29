@@ -316,3 +316,17 @@ def test_ft_alias_marks_strength_and_leaves_one_epoch_alone():
     assert ft.ft_alias("m", "ben_Beng", epochs=1) == "m-ft-ben_Beng"
     assert ft.ft_alias("m", "ben_Beng", epochs=3) == "m-ft3ep-ben_Beng"
     assert ft.ft_alias("m", "ben_Beng", epochs=3) != ft.ft_alias("m", "ben_Beng")
+
+
+def test_training_metadata_names_the_condition_that_actually_ran():
+    """A 3-epoch run must not record the 1-epoch alias in its own provenance.
+
+    ft_model_alias was built without the epoch count, so P1-Strong training
+    metadata would have claimed to be the P1-Standard cell -- silently, in the
+    one file whose job is to say what ran.
+    """
+    src = (REPO / "quantlang" / "finetune.py").read_text(encoding="utf-8")
+    assert 'ft_alias(model_alias, lang,\n' in src and \
+           'epochs=train_stats["epochs"]' in src, (
+        "ft_model_alias must carry the RESOLVED epoch count")
+    assert '"ft_model_alias": ft_alias(model_alias, lang),' not in src

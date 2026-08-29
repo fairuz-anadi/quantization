@@ -600,7 +600,12 @@ def finetune_language(
         "base_model": hf_id,
         "base_model_alias": model_alias,
         "base_model_revision": revision,
-        "ft_model_alias": ft_alias(model_alias, lang),
+        # Resolved epochs, not the argument: `epochs=None` means the frozen
+        # config, and the metadata must name the condition that actually ran.
+        # Without this a 3-epoch run records the 1-epoch alias and claims, in
+        # its own provenance, to be the P1-Standard cell.
+        "ft_model_alias": ft_alias(model_alias, lang,
+                                   epochs=train_stats["epochs"]),
         "train_precision": ft["train_precision"],
         "seed": seed,
         "n_train_items_available": manifest["languages"][lang]["n_train_items"],
