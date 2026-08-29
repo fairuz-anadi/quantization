@@ -55,6 +55,11 @@ def main() -> int:
                          "result alias becomes finetune.ft_alias(...) "
                          "automatically, so an FT cell can never collide with a "
                          "Base cell.")
+    ap.add_argument("--ft-epochs", type=int, default=1,
+                    help="Adaptation strength of the checkpoint being scored. "
+                         "Goes into the result alias, so a P1-Strong cell is "
+                         "self-describing in its own filename and can never be "
+                         "pooled with a P1-Standard cell. Default 1.")
     ap.add_argument("--ft-lang", default=None,
                     help="the language the checkpoint was fine-tuned ON. "
                          "Required with --local-checkpoint, and deliberately "
@@ -137,7 +142,8 @@ def main() -> int:
             raise SystemExit(
                 f"FATAL: {local_checkpoint} holds no *.safetensors weights. "
                 f"That is not a merged checkpoint.")
-        result_alias = finetune.ft_alias(entry["alias"], args.ft_lang)
+        result_alias = finetune.ft_alias(entry["alias"], args.ft_lang,
+                                         epochs=args.ft_epochs)
     elif args.ft_lang:
         raise SystemExit(
             "FATAL: --ft-lang without --local-checkpoint. Naming a fine-tuning "

@@ -30,3 +30,4 @@ results/**/adapter_model.safetensors
 
 # Scratch analysis artefacts.
 results/_*.pkl
+results/p1_all_raw/

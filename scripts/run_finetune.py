@@ -61,6 +61,12 @@ def main() -> int:
                     help="cap training items. Smoke tests only -- a limited run "
                          "is not a P1 cell.")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="Override finetune.training.epochs. This is the ONLY "
+                         "factor P1-Strong varies; everything else stays "
+                         "frozen. Artefacts and the result alias are marked "
+                         "with the epoch count so a stronger run can never be "
+                         "confused with the 1-epoch P1-Standard cells.")
     args = ap.parse_args()
 
     cfg = cfg_mod.load()
@@ -97,13 +103,20 @@ def main() -> int:
             f"mistaken for one.", file=sys.stderr)
 
     outdir = Path(args.outdir)
-    run_name = f"{args.lang}__seed{seed}"
+    # The epoch marker keeps P1-Strong artefacts beside P1-Standard's rather
+    # than on top of them. One epoch keeps the original bare name so the
+    # completed sessions B and C stay addressable by the paths they wrote.
+    epochs = args.epochs
+    suffix = "" if epochs in (None, 1) else f"__{epochs}ep"
+    run_name = f"{args.lang}__seed{seed}{suffix}"
     adapter_dir = outdir / "adapters" / run_name
     merged_dir = outdir / "merged" / run_name
 
     print(f"base model : {entry['hf_id']} @ {revision}")
     print(f"language   : {args.lang}")
     print(f"seed       : {seed} ({args.seed_role})")
+    print(f"epochs     : {epochs if epochs is not None else 'config default'}"
+          f"{'   [P1-Strong]' if epochs not in (None, 1) else ''}")
     print(f"adapter    : {adapter_dir}")
     print(f"merged     : {merged_dir}\n")
 
@@ -119,6 +132,7 @@ def main() -> int:
         limit=args.limit,
         device=args.device,
         tag=args.tag,
+        epochs=epochs,
     )
 
     t = meta["training"]

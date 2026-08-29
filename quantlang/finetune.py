@@ -295,7 +295,8 @@ def _lr_at(step: int, total: int, base_lr: float, warmup_ratio: float,
 
 def train_lora(cfg: dict[str, Any], peft_model, examples: list[dict], *,
                seed: int, device: str = "cuda:0",
-               log_every: int = 10) -> dict[str, Any]:
+               log_every: int = 10,
+               epochs: int | None = None) -> dict[str, Any]:
     """One epoch-based LoRA training run. Deterministic given `seed`.
 
     A hand-written loop rather than Trainer: it is short enough to read in one
@@ -303,7 +304,12 @@ def train_lora(cfg: dict[str, Any], peft_model, examples: list[dict], *,
     schedule), and it does not move under us across transformers releases.
     """
     tcfg = cfg_mod.require(cfg, "finetune.training")
-    epochs = int(tcfg["epochs"])
+    # An explicit override is the P1-Strong condition; None is P1-Standard and
+    # reads the frozen config. The cosine schedule below spans the FULL run, so
+    # three epochs is one 3-epoch schedule, not three 1-epoch schedules.
+    epochs = int(tcfg["epochs"]) if epochs is None else int(epochs)
+    if epochs < 1:
+        raise FineTuneError(f"epochs must be >= 1, got {epochs}")
     accum = int(tcfg["gradient_accumulation_steps"])
     base_lr = float(tcfg["learning_rate"])
     warmup_ratio = float(tcfg["warmup_ratio"])
@@ -532,8 +538,16 @@ def finetune_language(
     limit: int | None = None,
     device: str = "cuda:0",
     tag: str = "p1",
+    epochs: int | None = None,
 ) -> dict[str, Any]:
-    """Train a LoRA for one language, merge it, and record everything."""
+    """Train a LoRA for one language, merge it, and record everything.
+
+    `epochs=None` uses finetune.training.epochs from the frozen config, which is
+    the P1-Standard condition. Passing an integer overrides ONLY the number of
+    passes over the training set -- the corpus, split, LoRA rank, learning rate,
+    schedule shape, optimizer, sequence length and evaluation set are untouched,
+    so a difference between two runs is attributable to adaptation strength.
+    """
     manifest = p1data.load_split_manifest()
     items = p1data.load_partition(cfg, lang, "train", manifest)
     if limit is not None:
@@ -562,7 +576,8 @@ def finetune_language(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(torch.device(device))
 
-    train_stats = train_lora(cfg, peft_model, examples, seed=seed, device=device)
+    train_stats = train_lora(cfg, peft_model, examples, seed=seed,
+                             device=device, epochs=epochs)
 
     peak_gb = (torch.cuda.max_memory_allocated(torch.device(device)) / 1024**3
                if torch.cuda.is_available() else None)
@@ -631,13 +646,22 @@ def finetune_language(
     return meta
 
 
-def ft_alias(model_alias: str, lang: str) -> str:
+def ft_alias(model_alias: str, lang: str, epochs: int = 1) -> str:
     """Result alias for a fine-tuned model, e.g. qwen2.5-3b-instruct-ft-ben_Beng.
 
     Distinct from the base alias so P0 and P1 rows can never collide, and free
     of '__' so it stays safe in raw result filenames.
+
+    `epochs` names the adaptation STRENGTH, which is the only factor P1-Strong
+    varies. One epoch keeps the bare `-ft-` form so the completed P1-Standard
+    cells keep the aliases they were written with; anything else is marked, so
+    two adaptation strengths can never land in the same result filename and be
+    averaged together by accident.
     """
-    alias = f"{model_alias}-ft-{lang}"
+    if epochs < 1:
+        raise FineTuneError(f"epochs must be >= 1, got {epochs}")
+    marker = "ft" if epochs == 1 else f"ft{epochs}ep"
+    alias = f"{model_alias}-{marker}-{lang}"
     if "__" in alias:
         raise FineTuneError(
             f"FT alias {alias!r} contains '__', the field separator in raw "
