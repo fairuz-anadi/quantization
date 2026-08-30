@@ -188,3 +188,32 @@ def test_h5_is_recorded_before_any_replication_result():
     for lang in ("ben_Beng", "npi_Deva", "asm_Beng", "sin_Sinh"):
         assert lang in doc, f"{lang} must have a stated directional prediction"
     assert "not adjusted to accommodate an outcome" in doc
+
+
+def test_both_notebook_generators_emit_the_auth_cell():
+    """A gated model must not clear phase 1 and then 401 in phase 2.
+
+    That happened: the FP16 gate generator had the HF_TOKEN cell and the
+    quantized generator did not, so gemma-2-2b-it passed the gate on all five
+    languages and died on a 401 two and a half GPU-minutes into the NF4 run --
+    same model, same settings, different notebook.
+    """
+    for name in ("make_replication_notebook.py",
+                 "make_replication_quantized_notebook.py"):
+        src = (REPO / "scripts" / name).read_text(encoding="utf-8")
+        assert "UserSecretsClient" in src, f"{name} emits no HF auth cell"
+        assert 'get_secret("HF_TOKEN")' in src, f"{name} reads the wrong secret"
+
+
+def test_a_gated_model_gets_an_auth_cell_before_it_needs_one():
+    """The token must be set BEFORE anything touches the Hub."""
+    for stem in ("kaggle_rep_gemma-2-2b-it_fp16", "kaggle_rep_gemma-2-2b-it_nf4"):
+        p = REPO / "notebooks" / f"{stem}.ipynb"
+        if not p.exists():
+            continue
+        cells = [("".join(c["source"])) for c in
+                 json.loads(p.read_text(encoding="utf-8"))["cells"]]
+        auth = next(i for i, s in enumerate(cells) if "HF_TOKEN" in s)
+        hub = next(i for i, s in enumerate(cells)
+                   if "run_eval.py" in s or "probe_model_compat.py" in s)
+        assert auth < hub, f"{stem}: auth cell must precede any Hub access"
