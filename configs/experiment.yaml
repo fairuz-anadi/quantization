@@ -135,14 +135,32 @@ replication_models:
     role: replication
     note: "H5 primary contrast. BLOOM covers bn/as/ne but not si."
 
-  # Gated: requires accepting the Gemma licence and an HF_TOKEN. Preflight
-  # cannot run until then, so this is listed but UNVERIFIED. 2B against Qwen's
-  # 3B, so size is confounded with family.
+  # THIRD MODEL, added 2026-08-31 as a robustness test of H5 across a third
+  # family. Revision pinned from public Hub metadata; the WEIGHTS are gated, so
+  # the tokenizer preflight has NOT been run locally and must pass inside the
+  # Kaggle session (with HF_TOKEN) before any evaluation. The gate notebook runs
+  # it first and stops the session if it fails.
+  #
+  # Chosen over meta-llama/Llama-3.2-3B-Instruct on language coverage: Llama 3.2
+  # officially supports 8 languages (en, de, fr, it, pt, hi, es, th), of which
+  # none of ben/npi/asm/sin is one. Gemma 2's pretraining is broadly
+  # multilingual, which makes a five-language comparison more likely to sit
+  # above the floor. Open alternatives were measured and rejected for the same
+  # reason -- Falcon3-3B and SmolLM3-3B cover no Indic language, and
+  # sarvamai/sarvam-1 covers Bengali but not Nepali, Assamese or Sinhala.
+  #
+  # CONFOUNDS, recorded because they are not controlled: 2.6B parameters against
+  # Qwen's 3.1B and BLOOMZ's 3.0B; instruction-tuned, as Qwen is and BLOOMZ only
+  # partially (xP3); SentencePiece tokenizer with a 256k vocabulary; a 2024
+  # Google model against Qwen 2024 (Alibaba) and BLOOM 2022 (BigScience).
+  # Differences between these models are NOT attributable to tokenization alone.
   - alias: gemma-2-2b-it
     hf_id: google/gemma-2-2b-it
-    revision: null          # PIN before the run that goes in the paper
+    revision: "299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8"   # pinned 2026-08-31
     role: replication
-    note: "SECONDARY. Gated; preflight not yet run. Do not evaluate before it passes."
+    note: "THIRD MODEL. GATED -- needs HF_TOKEN. Tokenizer preflight UNVERIFIED
+      locally; it runs first in the gate notebook and halts the session on
+      failure."
 
 finetune:
   # Frozen 2026-08-28. multi-wiki-qa is the only dataset found that covers all

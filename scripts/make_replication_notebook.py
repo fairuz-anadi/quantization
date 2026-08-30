@@ -86,6 +86,19 @@ print(subprocess.run(["git", "-C", SRC, "rev-parse", "HEAD"],
                      capture_output=True, text=True).stdout.strip())
 os.chdir(SRC); sys.path.insert(0, SRC)'''),
 
+        ("code", """# 1b. Hugging Face auth, for gated repositories.
+#
+# A gated model (Gemma, Llama) will NOT download without an accepted licence and
+# a token. This reads it from Kaggle Secrets and reports plainly, so a missing
+# token surfaces here rather than as a confusing 401 six minutes later.
+import os
+try:
+    from kaggle_secrets import UserSecretsClient
+    os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+    print("HF_TOKEN loaded from Kaggle Secrets")
+except Exception as exc:
+    print(f"no HF_TOKEN secret ({type(exc).__name__}). Fine for an open model; "
+          f"a gated one fails at the preflight below with a clear message.")"""),
         ("code", '# 2. Dependencies. Kaggle\'s torch is CUDA-matched -- never reinstall it.\n'
                  '!pip install -q -U "transformers>=4.45" "bitsandbytes>=0.43" "peft>=0.13" '
                  'accelerate datasets pyyaml\n'

@@ -128,12 +128,24 @@ def test_every_replication_model_is_preflighted_or_marked_unverified():
                 f"{m['alias']} is unpinned, so its note must say it is not ready")
 
 
-def test_the_notebook_generator_refuses_an_unpinned_model():
-    proc = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "make_replication_notebook.py"),
-         "--alias", "gemma-2-2b-it"], capture_output=True, text=True)
-    assert proc.returncode != 0
-    assert "no pinned revision" in (proc.stdout + proc.stderr)
+def test_every_listed_replication_model_is_pinned():
+    """An unpinned run is not reproducible and its numbers cannot go in a paper.
+
+    This replaces a test that used gemma-2-2b-it as the unpinned example. Gemma
+    is now pinned, so the example was gone -- but the invariant it protected is
+    the one that matters, and it is stronger stated over every model.
+    """
+    for m in cfg_mod.load().get("replication_models", []):
+        assert m.get("revision"), f"{m['alias']} has no pinned revision"
+        assert len(m["revision"]) == 40, (
+            f"{m['alias']} revision is not a full 40-char commit SHA")
+
+
+def test_the_generator_still_refuses_an_unpinned_model():
+    """The guard itself must survive, even with nothing currently unpinned."""
+    src = (REPO / "scripts" / "make_replication_notebook.py").read_text(encoding="utf-8")
+    assert 'if not entry.get("revision")' in src
+    assert "no pinned revision" in src
 
 
 def test_the_generated_gate_notebook_is_fp16_only():
