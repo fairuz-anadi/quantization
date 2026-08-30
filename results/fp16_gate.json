@@ -1,0 +1,67 @@
+[
+  {
+    "lang": "asm_Beng",
+    "n": 900,
+    "correct": 509,
+    "acc": 0.5655555555555556,
+    "lo": 0.5329605430749784,
+    "hi": 0.5975933265757096,
+    "tokens": 202.0,
+    "trunc": 0,
+    "alias": "bloomz-3b",
+    "arm": "base",
+    "passes": true
+  },
+  {
+    "lang": "ben_Beng",
+    "n": 900,
+    "correct": 547,
+    "acc": 0.6077777777777778,
+    "lo": 0.5754861298247496,
+    "hi": 0.6391532829907882,
+    "tokens": 170.0,
+    "trunc": 0,
+    "alias": "bloomz-3b",
+    "arm": "base",
+    "passes": true
+  },
+  {
+    "lang": "eng_Latn",
+    "n": 900,
+    "correct": 716,
+    "acc": 0.7955555555555556,
+    "lo": 0.7679773348149275,
+    "hi": 0.820621467339022,
+    "tokens": 147.0,
+    "trunc": 0,
+    "alias": "bloomz-3b",
+    "arm": "base",
+    "passes": true
+  },
+  {
+    "lang": "npi_Deva",
+    "n": 900,
+    "correct": 529,
+    "acc": 0.5877777777777777,
+    "lo": 0.5553122064039985,
+    "hi": 0.619497212280821,
+    "tokens": 169.0,
+    "trunc": 0,
+    "alias": "bloomz-3b",
+    "arm": "base",
+    "passes": true
+  },
+  {
+    "lang": "sin_Sinh",
+    "n": 900,
+    "correct": 234,
+    "acc": 0.26,
+    "lo": 0.23240590054266796,
+    "hi": 0.2896341698887114,
+    "tokens": 1108.5,
+    "trunc": 0,
+    "alias": "bloomz-3b",
+    "arm": "base",
+    "passes": false
+  }
+]

@@ -1,0 +1,58 @@
+{
+  "model": {
+    "hf_id": "bigscience/bloomz-3b",
+    "revision": "31eefcb2bcd69632925adf07e090debafe95436d",
+    "tokenizer_loaded": true,
+    "gated": false,
+    "vocab_size": 250680,
+    "option_encodings": {
+      "A": [
+        419
+      ],
+      "B": [
+        490
+      ],
+      "C": [
+        405
+      ],
+      "D": [
+        524
+      ]
+    },
+    "letters_single_token": true,
+    "letters_distinct": true,
+    "ok": true
+  },
+  "burden": {
+    "eng_Latn": {
+      "n_items": 60,
+      "median_tokens": 160,
+      "mean_tokens": 153.6,
+      "max_tokens": 236
+    },
+    "ben_Beng": {
+      "n_items": 60,
+      "median_tokens": 172,
+      "mean_tokens": 175.5,
+      "max_tokens": 276
+    },
+    "sin_Sinh": {
+      "n_items": 60,
+      "median_tokens": 1209,
+      "mean_tokens": 1193.3,
+      "max_tokens": 2131
+    },
+    "asm_Beng": {
+      "n_items": 60,
+      "median_tokens": 212,
+      "mean_tokens": 210.5,
+      "max_tokens": 361
+    },
+    "npi_Deva": {
+      "n_items": 60,
+      "median_tokens": 177,
+      "mean_tokens": 177.1,
+      "max_tokens": 279
+    }
+  }
+}
