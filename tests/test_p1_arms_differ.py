@@ -330,3 +330,25 @@ def test_training_metadata_names_the_condition_that_actually_ran():
            'epochs=train_stats["epochs"]' in src, (
         "ft_model_alias must carry the RESOLVED epoch count")
     assert '"ft_model_alias": ft_alias(model_alias, lang),' not in src
+
+
+def test_model_compat_probe_refuses_an_unusable_tokenizer():
+    """Phi-3.5-mini's letter tokens are not single tokens; the probe must say so.
+
+    letter_logit reads the logit of " A".." D" and requires each to be exactly
+    one distinct token. A model that fails this cannot be scored by the P0
+    procedure at all, and the correct response is to pick another model -- never
+    to change the scoring method, which would make its numbers incomparable
+    with P0's. The check costs seconds and runs before any download.
+    """
+    import subprocess, sys
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "probe_model_compat.py"), "--help"],
+        capture_output=True, text=True, check=True).stdout
+    assert "--hf-id" in out and "--load" in out
+
+    src = (REPO / "scripts" / "probe_model_compat.py").read_text(encoding="utf-8")
+    assert "letters_single_token" in src
+    assert "do NOT change the scoring method" in src, (
+        "the failure message must steer away from relaxing the scoring method")
+    assert "gated repo" in src, "a gated model must be reported as gated, not as broken"
