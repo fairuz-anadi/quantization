@@ -71,13 +71,27 @@ def main() -> int:
     cfg = cfg_mod.load()
 
     models = cfg_mod.require(cfg, "models")
+    # `replication_models` is a separate top-level key on purpose: `models` is
+    # inside freeze_p0.P0_CONFIG_KEYS, so adding an entry there would break the
+    # P0 freeze for a model P0 never ran. Frozen models are searched FIRST and
+    # this fallback is reached only on a miss, so P0's selection is unchanged.
+    replication = cfg.get("replication_models") or []
+    model_role = "p0"
     if args.model_alias:
         chosen = [m for m in models if m["alias"] == args.model_alias]
         if not chosen:
+            chosen = [m for m in replication if m["alias"] == args.model_alias]
+            model_role = "replication"
+        if not chosen:
             raise SystemExit(
                 f"FATAL: no model with alias {args.model_alias!r} in the config. "
-                f"Available: {[m['alias'] for m in models]}"
+                f"Frozen models: {[m['alias'] for m in models]}. "
+                f"Replication models: {[m['alias'] for m in replication]}."
             )
+        if len(chosen) != 1:
+            raise SystemExit(
+                f"FATAL: alias {args.model_alias!r} matches {len(chosen)} "
+                f"entries. An alias must identify exactly one model.")
     else:
         chosen = [m for m in models if m.get("role") == "primary"]
         if len(chosen) != 1:
@@ -86,6 +100,10 @@ def main() -> int:
                 f"{len(chosen)}. Name one explicitly with --model-alias."
             )
     entry = chosen[0]
+    if model_role == "replication":
+        print(f"REPLICATION MODEL: {entry['alias']} (role={entry.get('role')}). "
+              f"This is not a P0 cell. P0's five Base cells were produced by "
+              f"{[m['alias'] for m in models]} and are unchanged.", file=sys.stderr)
     revision = entry.get("revision")
     if not revision:
         raise SystemExit(

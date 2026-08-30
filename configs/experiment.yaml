@@ -106,6 +106,44 @@ stats:
 # model is scored by exactly the code that scored the base model, so the only
 # thing that differs between the Base and FT arms is the weights.
 # ===========================================================================
+# ===========================================================================
+# REPLICATION MODELS -- a NEW TOP-LEVEL KEY, deliberately not `models`.
+#
+# `models` is inside freeze_p0.P0_CONFIG_KEYS. Adding an entry there would
+# change the P0 config digest and break the freeze that gates every notebook,
+# for a model P0 never ran. The freeze's own comment names the boundary: a new
+# top-level key leaves the digest untouched, editing a P0 value does not.
+#
+# So a replication model is selected by --model-alias, resolved from HERE after
+# `models` has been searched and missed. P0's selection path -- no flag, or an
+# alias that IS in `models` -- is byte-identical to what produced its results.
+#
+# These exist to test H5 (docs/H5_PREREGISTRATION.md) across a second
+# tokenizer. Both cleared scripts/probe_model_compat.py for letter_logit
+# scoring before being listed.
+replication_models:
+  # Cleared preflight 2026-08-30: ' A'..' D' are single distinct tokens; max
+  # rendered prompt 2131 tokens against scoring.max_input_tokens 4096, so no
+  # truncation. Median tokens/item 153/164/176/197/1168 for eng/ben/npi/asm/sin
+  # -- Bangla 4.3x cheaper than Qwen, Sinhala 1.2x dearer, which is the
+  # contrast H5 is tested on. NOT instruction-tuned in the same sense as
+  # Qwen2.5-3B-Instruct; xP3-tuned, a weaker instruction follower. That is a
+  # stated confound, not a controlled one.
+  - alias: bloomz-3b
+    hf_id: bigscience/bloomz-3b
+    revision: "31eefcb2bcd69632925adf07e090debafe95436d"   # pinned 2026-08-30
+    role: replication
+    note: "H5 primary contrast. BLOOM covers bn/as/ne but not si."
+
+  # Gated: requires accepting the Gemma licence and an HF_TOKEN. Preflight
+  # cannot run until then, so this is listed but UNVERIFIED. 2B against Qwen's
+  # 3B, so size is confounded with family.
+  - alias: gemma-2-2b-it
+    hf_id: google/gemma-2-2b-it
+    revision: null          # PIN before the run that goes in the paper
+    role: replication
+    note: "SECONDARY. Gated; preflight not yet run. Do not evaluate before it passes."
+
 finetune:
   # Frozen 2026-08-28. multi-wiki-qa is the only dataset found that covers all
   # five languages without contaminating the evaluation set.
