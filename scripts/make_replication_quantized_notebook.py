@@ -93,8 +93,11 @@ shutil.make_archive("/kaggle/working/repq_{alias}", "zip", KEEP)
 print(sorted(os.listdir("/kaggle/working")))'''
 
 
-def build(alias: str, entry: dict, langs: list[str], floored: list[str]) -> dict:
+def build(alias: str, entry: dict, langs: list[str], floored: list[str],
+          precisions: list[str]) -> dict:
     lang_args = ",\n         ".join(repr(l) for l in langs)
+    prec_label = " and ".join(p.replace("int8_llmint8", "INT8").replace("nf4", "NF4")
+                              for p in precisions)
     excl = ""
     if floored:
         excl = (
@@ -106,9 +109,9 @@ def build(alias: str, entry: dict, langs: list[str], floored: list[str]) -> dict
             "direction.")
 
     cells = [
-        ("markdown", f"""# Replication quantized pass - {alias}
+        ("markdown", f"""# Replication quantized pass - {alias} ({prec_label})
 
-INT8 and NF4 on **{entry['hf_id']}** @ `{entry['revision'][:12]}`, on the
+{prec_label} on **{entry['hf_id']}** @ `{entry['revision'][:12]}`, on the
 languages that cleared the FP16 floor gate. FP16 is NOT re-run; those cells
 already exist from the gate run.{excl}
 
@@ -121,12 +124,12 @@ should show smaller FP16-to-NF4 degradation than Qwen showed for them.
         ("code", GATE + '\ngate("scripts/probe_env.py", "--outdir", "/kaggle/working")'),
         ("markdown", "## P0 is still frozen, and the suite still passes"),
         ("code", GATE + '\ngate("scripts/freeze_p0.py")\ngate("-m", "pytest", "-q")'),
-        ("markdown", f"""## INT8 and NF4
+        ("markdown", f"""## {prec_label}
 
 Same evaluator, same frozen 900-item manifest, same `letter_logit` scoring as
 P0 and as the FP16 gate run. Languages: `{'`, `'.join(langs)}`."""),
         ("code", GATE + f'''
-for prec in ["int8_llmint8", "nf4"]:
+for prec in {precisions!r}:
     gate("scripts/run_eval.py", "--precision", prec,
          "--langs",
          {lang_args},
@@ -145,6 +148,11 @@ def main() -> int:
     ap.add_argument("--alias", required=True)
     ap.add_argument("--langs", nargs="+", required=True,
                     help="languages that PASSED the FP16 floor gate")
+    ap.add_argument("--precisions", nargs="+", default=["int8_llmint8", "nf4"],
+                    choices=["int8_llmint8", "nf4"],
+                    help="which quantized precisions to run. H5 concerns FP16 "
+                         "-> NF4 only, so --precisions nf4 is the cheap path "
+                         "when INT8 is not needed for table symmetry.")
     ap.add_argument("--floored", nargs="*", default=[],
                     help="languages excluded by the gate; recorded in the notebook")
     args = ap.parse_args()
@@ -167,12 +175,13 @@ def main() -> int:
     if overlap:
         raise SystemExit(f"FATAL: {sorted(overlap)} cannot both pass and be floored")
 
-    path = OUT_DIR / f"kaggle_rep_{args.alias}_quantized.ipynb"
-    path.write_text(json.dumps(build(args.alias, entry, args.langs, args.floored),
+    path = OUT_DIR / f"kaggle_rep_{args.alias}_{'_'.join(args.precisions)}.ipynb"
+    path.write_text(json.dumps(build(args.alias, entry, args.langs,
+                                     args.floored, args.precisions),
                                indent=1), encoding="utf-8")
     print(f"wrote {path}")
     print(f"  model     : {entry['hf_id']} @ {entry['revision'][:12]}")
-    print(f"  precisions: int8_llmint8, nf4")
+    print(f"  precisions: {', '.join(args.precisions)}")
     print(f"  languages : {args.langs}")
     if args.floored:
         print(f"  FLOORED   : {args.floored} -- excluded, and recorded in the "
